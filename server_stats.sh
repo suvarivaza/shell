@@ -74,12 +74,12 @@ function general_stats {
 while true; do
     echo
     echo "Выберите действие:"
-    echo "1. CPU usage"
-    echo "2. memory usage"
-    echo "3. disk usage"
-    echo "4. top CPU processes"
-    echo "5. top memory processes"
-    echo "6. Общая статистика"
+    echo "1. Использование CPU"
+    echo "2. Исползование памяти"
+    echo "3. Использование диска"
+    echo "4. Топ CPU процессов"
+    echo "5. Топ процессов памяти"
+    echo "6. Общая статистика сервера"
     echo "0. Выход"
     echo
     read -p "Введите номер действия: " CHOICE
