@@ -5,5 +5,12 @@
 3.	Запустить скрипт: ./web_server_analysis.sh
 
 Или так:
+```
 bash <(wget -q -O- --no-check-certificate https://raw.githubusercontent.com/suvarivaza/shell/main/server_analysis.sh)
+```
+
+
+Полезное:
+https://github.com/awesome-lists/awesome-bash
+
 
