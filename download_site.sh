@@ -1,9 +1,14 @@
 #!/bin/bash
 
-LOCAL_FILES_PATH="../src" # путь до локальной директории
-SSH="" # user@ip_adres
-REMOTE_FILES_PATH="" # путь до директории на сервере
-EXCLUDE_PATH="" # каки папки сайта не загружать " --exclude='works_files' --exclude='works_img' --exclude='app/logs' "
+# Загрузить переменные из файла .env
+set -a
+source .env
+set +a
+
+LOCAL_FILES_PATH="$LOCAL_FILES_PATH" # путь до локальной директории
+SSH="$SSH_USER@$SSH_IP"
+REMOTE_FILES_PATH="$REMOTE_FILES_PATH" # путь до директории на сервере
+EXCLUDE_PATH="$EXCLUDE_PATH" # каки папки сайта не загружать " --exclude='works_files' --exclude='works_img' --exclude='app/logs' "
 
 function request_local_files_path() {
 
