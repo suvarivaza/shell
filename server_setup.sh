@@ -40,7 +40,13 @@ open_ssh_access_by_password() {
 
 check_ssh_connection_by_password(){
   echo -e "${CYAN}==================== Пробуем подключится к SSH по паролю ====================${RESET}"
-  ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no root@localhost || echo -e "${RED}Не удалось подключится к SSH по паролю!${RESET}"
+
+  if ! ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no root@localhost; then
+    echo "✅ Проверка пройдена: подключение по паролю не удалось, как и должно быть."
+  else
+    echo "⚠️ Осторожно: подключение по паролю УДАЛОСЬ!"
+  fi
+
 }
 
 restart_ssh() {
