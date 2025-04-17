@@ -64,7 +64,8 @@ while true; do
   echo "Выберите действие:"
   echo "1. Проверить SSH настройки"
   echo "2. Заблокировать доступ к SSH по паролю"
-  echo "3. Попробовать подключится к SSH по паролю"
+  echo "3. Открыть доступ к SSH по паролю"
+  echo "4. Попробовать подключится к SSH по паролю"
   echo "0. Выход"
   echo
   read -p "Введите номер действия: " CHOICE
@@ -72,7 +73,8 @@ while true; do
   case $CHOICE in
   1) check_ssh_settings ;;
   2) block_ssh_access_by_password ;;
-  3) check_ssh_connection_by_password ;;
+  3) open_ssh_access_by_password ;;
+  4) check_ssh_connection_by_password ;;
   0)
     echo "Выход."
     exit 0
