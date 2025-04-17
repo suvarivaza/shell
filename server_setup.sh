@@ -161,6 +161,7 @@ fail2ban_settings_menu() {
           2) check_status_fail2ban ;;
           3) fail2ban_configure_nginx ;;
           4) fail2ban_configure_ssh ;;
+          5) check_status_fail2ban_nginx ;;
           0) break ;;
           *) echo "Неверный выбор. Пожалуйста, попробуйте снова." ;;
       esac
