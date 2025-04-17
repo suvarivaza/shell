@@ -76,9 +76,10 @@ NGINX_FILTER="/etc/fail2ban/filter.d/nginx-badbots.conf"
 
 function install_fail2ban() {
     echo -e "${CYAN}========== Устанавливаем Fail2ban... ==========${RESET}"
-    sudo apt update
-    sudo apt install -y fail2ban
-    echo "Fail2ban установлен."
+    sudo apt update && \
+    sudo apt install -y fail2ban && \
+    echo "Fail2ban установлен." && \
+    check_status_fail2ban
 }
 
 function check_status_fail2ban() {
@@ -151,6 +152,7 @@ fail2ban_settings_menu() {
       echo "2. Проверить статус Fail2ban"
       echo "3. Сконфигурировать Fail2ban для nginx"
       echo "4. Сконфигурировать Fail2ban для ssh"
+      echo "5. Проверить статус Fail2ban client для nginx"
       echo "0. Назад в главное меню"
       read -rp "Выберите действие [1-4]: " CHOICE
 
@@ -185,6 +187,7 @@ ssh_settings_menu() {
       2) block_ssh_access_by_password ;;
       3) open_ssh_access_by_password ;;
       4) check_ssh_connection_by_password ;;
+      5) check_status_fail2ban_nginx ;;
       0) break ;;
       *) echo "Неверный выбор. Пожалуйста, попробуйте снова." ;;
     esac
