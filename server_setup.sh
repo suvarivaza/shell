@@ -81,6 +81,14 @@ function install_fail2ban() {
     echo "Fail2ban установлен."
 }
 
+function check_status_fail2ban() {
+    sudo systemctl status fail2ban
+}
+
+function check_status_fail2ban_nginx() {
+    sudo fail2ban-client status nginx-badbots
+}
+
 function fail2ban_configure_nginx() {
     echo -e "${CYAN}========== Настраиваем Fail2ban для nginx.. ==========${RESET}"
 
@@ -139,16 +147,18 @@ fail2ban_settings_menu() {
   while true; do
       echo ""
       echo -e "${CYAN}=== Fail2ban Settings ===${RESET}"
-      echo "1) Установить Fail2ban"
-      echo "2) Сконфигурировать Fail2ban для nginx"
-      echo "3) Сконфигурировать Fail2ban для ssh"
-      echo "4) Выход"
+      echo "1. Установить Fail2ban"
+      echo "2. Проверить статус Fail2ban"
+      echo "3. Сконфигурировать Fail2ban для nginx"
+      echo "4. Сконфигурировать Fail2ban для ssh"
+      echo "0. Назад в главное меню"
       read -rp "Выберите действие [1-4]: " CHOICE
 
       case $CHOICE in
           1) install_fail2ban ;;
-          2) fail2ban_configure_nginx ;;
-          3) fail2ban_configure_ssh ;;
+          2) check_status_fail2ban ;;
+          3) fail2ban_configure_nginx ;;
+          4) fail2ban_configure_ssh ;;
           0) break ;;
           *) echo "Неверный выбор. Пожалуйста, попробуйте снова." ;;
       esac
