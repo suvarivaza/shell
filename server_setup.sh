@@ -80,7 +80,7 @@ NGINX_ACCESS_LOG="/var/log/nginx/access.log"
 
 install_fail2ban() {
   echo -e "${CYAN}========== Устанавливаем Fail2ban... ==========${RESET}"
-  echo -e "${GREEN} Выполняю: sudo apt update && sudo apt install -y fail2ban ${RESET}"
+  echo -e "${GREEN}Выполняю: sudo apt update && sudo apt install -y fail2ban ${RESET}"
   sudo apt update && sudo apt install -y fail2ban &&
   echo "Fail2ban установлен." &&
   check_status_fail2ban
@@ -142,25 +142,25 @@ EOF
 
 check_status_fail2ban() {
   echo -e "${CYAN}========== Проверяем статус Fail2ban ==========${RESET}"
-  echo -e "${GREEN} Выполняю: sudo systemctl status fail2ban ${RESET}"
+  echo -e "${GREEN}Выполняю: sudo systemctl status fail2ban ${RESET}"
   sudo systemctl status fail2ban
 }
 
 check_status_fail2ban_nginx() {
   echo -e "${CYAN}========== Проверяем статус Fail2ban nginx ==========${RESET}"
-  echo "sudo fail2ban-client status nginx-badbots"
+  echo -e "${GREEN}Выполняю: sudo fail2ban-client status nginx-badbots ${RESET}"
   sudo fail2ban-client status nginx-badbots
 }
 
 check_status_fail2ban_ssh() {
   echo -e "${CYAN}========== Проверяем статус Fail2ban ssh ==========${RESET}"
-  echo -e "${GREEN} Выполняю: sudo fail2ban-client status sshd ${RESET}"
+  echo -e "${GREEN}Выполняю: sudo fail2ban-client status sshd ${RESET}"
   sudo fail2ban-client status sshd
 }
 
 fail2ban_log() {
   echo -e "${CYAN}========== Читаем логи Fail2ban ==========${RESET}"
-  echo -e "${GREEN} Выполняю: sudo tail -n 100 -f /var/log/fail2ban.log ${RESET}"
+  echo -e "${GREEN}Выполняю: sudo tail -n 100 -f /var/log/fail2ban.log ${RESET}"
   sudo tail -n 100 -f /var/log/fail2ban.log
 }
 
@@ -169,19 +169,19 @@ fail2ban_log() {
 ######### system  ########
 
 system_info() {
-  echo -e "${GREEN} Выполняю: cat /etc/os-release ${RESET}"
+  echo -e "${GREEN}Выполняю: cat /etc/os-release ${RESET}"
   cat /etc/os-release
-  echo -e "${GREEN} Выполняю: hostnamectl ${RESET}"
+  echo -e "${GREEN}Выполняю: hostnamectl ${RESET}"
   hostnamectl
 }
 
 all_services(){
-  echo -e "${GREEN} Выполняю: systemctl list-units --type=service ${RESET}"
+  echo -e "${GREEN}Выполняю: systemctl list-units --type=service ${RESET}"
   systemctl list-units --type=service
 }
 
 system_log(){
-  echo -e "${GREEN} Выполняю: tail -n 100 -f /var/log/syslog ${RESET}"
+  echo -e "${GREEN}Выполняю: tail -n 100 -f /var/log/syslog ${RESET}"
   tail -n 100 -f /var/log/syslog
 }
 
@@ -189,12 +189,12 @@ system_log(){
 ######### nginx  ########
 
 nginx_status(){
-  echo -e "${GREEN} Выполняю: systemctl status nginx ${RESET}"
+  echo -e "${GREEN}Выполняю: systemctl status nginx ${RESET}"
   systemctl status nginx
 }
 
 nginx_reload(){
-  echo -e "${GREEN} Выполняю: systemctl reload nginx ${RESET}"
+  echo -e "${GREEN}Выполняю: systemctl reload nginx ${RESET}"
   systemctl reload nginx
 }
 
@@ -203,7 +203,7 @@ nginx_reload(){
 ######### Networks  ########
 
 open_ports(){
-  echo -e "${GREEN} Выполняю: netstat -tnlp ${RESET}"
+  echo -e "${GREEN}Выполняю: netstat -tnlp ${RESET}"
   netstat -tnlp
 }
 
