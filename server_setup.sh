@@ -12,7 +12,7 @@ RESET='\033[0m' # Reset to default color
 
 check_ssh_settings() {
   echo -e "${CYAN}==================== Проверяем текущие SSH настройки ====================${RESET}"
-  echo "grep PubkeyAuthentication /etc/ssh/sshd_config && grep PasswordAuthentication /etc/ssh/sshd_config"
+  echo -e "${GREEN}Выполняю: grep PubkeyAuthentication /etc/ssh/sshd_config && grep PasswordAuthentication /etc/ssh/sshd_config ${RESET}"
   grep PubkeyAuthentication /etc/ssh/sshd_config && grep PasswordAuthentication /etc/ssh/sshd_config
 }
 
@@ -20,21 +20,21 @@ block_ssh_access_by_password() {
   echo -e "${CYAN}==================== Блокируем доступ к SSH по паролю ====================${RESET}"
 
   sudo sed -i 's/^#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config &&
-    sudo sed -i 's/^#PubkeyAuthentication no/PubkeyAuthentication yes/' /etc/ssh/sshd_config &&
-    sudo sed -i 's/^PubkeyAuthentication no/PubkeyAuthentication yes/' /etc/ssh/sshd_config &&
-    sudo sed -i 's/^#PasswordAuthentication no/PasswordAuthentication no/' /etc/ssh/sshd_config &&
-    sudo sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config &&
-    sudo sed -i 's/^PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config &&
-    restart_ssh && check_ssh_settings
+  sudo sed -i 's/^#PubkeyAuthentication no/PubkeyAuthentication yes/' /etc/ssh/sshd_config &&
+  sudo sed -i 's/^PubkeyAuthentication no/PubkeyAuthentication yes/' /etc/ssh/sshd_config &&
+  sudo sed -i 's/^#PasswordAuthentication no/PasswordAuthentication no/' /etc/ssh/sshd_config &&
+  sudo sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config &&
+  sudo sed -i 's/^PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config &&
+  restart_ssh && check_ssh_settings
 }
 
 open_ssh_access_by_password() {
   echo -e "${CYAN}==================== Открываем доступ к SSH по паролю ====================${RESET}"
 
   sudo sed -i 's/^#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config &&
-    sudo sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config &&
-    sudo sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config &&
-    restart_ssh && check_ssh_settings
+  sudo sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config &&
+  sudo sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config &&
+  restart_ssh && check_ssh_settings
 }
 
 check_ssh_connection_by_password() {
@@ -164,8 +164,6 @@ fail2ban_log() {
   sudo tail -n 100 -f /var/log/fail2ban.log
 }
 
-
-
 ######### system  ########
 
 system_info() {
@@ -175,39 +173,34 @@ system_info() {
   hostnamectl
 }
 
-all_services(){
+all_services() {
   echo -e "${GREEN}Выполняю: systemctl list-units --type=service ${RESET}"
   systemctl list-units --type=service
 }
 
-system_log(){
+system_log() {
   echo -e "${GREEN}Выполняю: tail -n 100 -f /var/log/syslog ${RESET}"
   tail -n 100 -f /var/log/syslog
 }
 
-
 ######### nginx  ########
 
-nginx_status(){
+nginx_status() {
   echo -e "${GREEN}Выполняю: systemctl status nginx ${RESET}"
   systemctl status nginx
 }
 
-nginx_reload(){
+nginx_reload() {
   echo -e "${GREEN}Выполняю: systemctl reload nginx ${RESET}"
   systemctl reload nginx
 }
 
-
-
 ######### Networks  ########
 
-open_ports(){
+open_ports() {
   echo -e "${GREEN}Выполняю: netstat -tnlp ${RESET}"
   netstat -tnlp
 }
-
-
 
 # Подменю nginx
 nginx_menu() {
@@ -251,8 +244,6 @@ system_menu() {
   done
 }
 
-
-
 # Подменю Users
 user_settings_menu() {
   while true; do
@@ -271,7 +262,6 @@ user_settings_menu() {
   done
 }
 
-
 # Подменю Users
 network_menu() {
   while true; do
@@ -289,7 +279,6 @@ network_menu() {
     esac
   done
 }
-
 
 # Подменю Fail2ban
 fail2ban_settings_menu() {
@@ -345,6 +334,29 @@ ssh_settings_menu() {
   done
 }
 
+rules_iptables() {
+  echo -e "${GREEN}Выполняю: sudo iptables -L -n --line-numbers ${RESET}"
+  sudo iptables -L -n --line-numbers
+}
+
+# Подменю iptables
+iptables_menu() {
+  while true; do
+    echo
+    echo -e "${CYAN}=== SSH menu ===${RESET}"
+    echo "1. Список правил iptables"
+    echo "0. Назад в главное меню"
+    echo
+    read -p "Выберите действие: " CHOICE
+
+    case $CHOICE in
+    1) rules_iptables ;;
+    0) break ;;
+    *) echo "Неверный выбор. Пожалуйста, попробуйте снова." ;;
+    esac
+  done
+}
+
 # Главное меню
 while true; do
   echo
@@ -355,6 +367,7 @@ while true; do
   echo "4. User Settings"
   echo "5. Nginx"
   echo "6. Network"
+  echo "7. Фаервол iptables"
   echo "0. Выход"
   echo
   read -p "Введите номер раздела: " MAIN_CHOICE
@@ -366,6 +379,7 @@ while true; do
   4) user_settings_menu ;;
   5) nginx_menu ;;
   6) network_menu ;;
+  7) iptables_menu ;;
   0)
     echo "Выход."
     exit 0
