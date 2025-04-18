@@ -15,6 +15,7 @@ RESET='\033[0m'  # Reset to default color
 
 check_ssh_settings(){
   echo -e "${CYAN}==================== Проверяем текущие SSH настройки ====================${RESET}"
+  echo "grep PubkeyAuthentication /etc/ssh/sshd_config && grep PasswordAuthentication /etc/ssh/sshd_config"
   grep PubkeyAuthentication /etc/ssh/sshd_config && grep PasswordAuthentication /etc/ssh/sshd_config
 }
 
@@ -62,35 +63,37 @@ restart_ssh() {
   fi
 }
 
+
+
+######### User ########
+
 create_new_user() {
   echo "Создание нового пользователя..."
   read -p "Введите имя пользователя: " USERNAME
+  echo "sudo adduser $USERNAME"
   sudo adduser "$USERNAME"
 }
 
 
-######### fail2ban ########
+
+######### fail2ban  ########
+
+# основной конфиг /etc/fail2ban/jail.conf
+# дополнительный локальный конфиг /etc/fail2ban/jail.local
 
 JAIL_LOCAL="/etc/fail2ban/jail.local"
 NGINX_FILTER="/etc/fail2ban/filter.d/nginx-badbots.conf"
+NGINX_ACCESS_LOG="/var/log/nginx/access.log"
 
 function install_fail2ban() {
     echo -e "${CYAN}========== Устанавливаем Fail2ban... ==========${RESET}"
-    sudo apt update && \
-    sudo apt install -y fail2ban && \
+    echo "sudo apt update && sudo apt install -y fail2ban"
+    sudo apt update && sudo apt install -y fail2ban && \
     echo "Fail2ban установлен." && \
     check_status_fail2ban
 }
 
-function check_status_fail2ban() {
-    echo -e "${CYAN}========== Проверяем статус Fail2ban ==========${RESET}"
-    sudo systemctl status fail2ban
-}
 
-function check_status_fail2ban_nginx() {
-    echo -e "${CYAN}========== Настраиваем Fail2ban для ssh.. ==========${RESET}"
-    sudo fail2ban-client status nginx-badbots
-}
 
 function fail2ban_configure_nginx() {
     echo -e "${CYAN}========== Проверяем статус Fail2ban client для nginx.. ==========${RESET}"
@@ -110,7 +113,7 @@ EOF
 enabled = true
 filter = nginx-badbots
 action = iptables[name=NGINX-BADBOTS, port=http, protocol=tcp]
-logpath = /var/log/nginx/access.log
+logpath = $NGINX_ACCESS_LOG
 maxretry = 1
 bantime = 86400
 findtime = 600
@@ -146,15 +149,42 @@ EOF
     sudo systemctl restart fail2ban
 }
 
+function check_status_fail2ban() {
+    echo -e "${CYAN}========== Проверяем статус Fail2ban ==========${RESET}"
+    echo "sudo systemctl status fail2ban"
+    sudo systemctl status fail2ban
+}
+
+function check_status_fail2ban_nginx() {
+    echo -e "${CYAN}========== Проверяем статус Fail2ban nginx ==========${RESET}"
+    echo "sudo fail2ban-client status nginx-badbots"
+    sudo fail2ban-client status nginx-badbots
+}
+
+function check_status_fail2ban_ssh() {
+    echo -e "${CYAN}========== Проверяем статус Fail2ban ssh ==========${RESET}"
+    echo "sudo fail2ban-client status sshd"
+    sudo fail2ban-client status sshd
+}
+
+function fail2ban_log() {
+    echo -e "${CYAN}========== Читаем логи Fail2ban ==========${RESET}"
+    echo "sudo tail -n 100 -f /var/log/fail2ban.log"
+    sudo tail -n 100 -f /var/log/fail2ban.log
+}
+
+# Подменю Fail2ban
 fail2ban_settings_menu() {
   while true; do
       echo ""
       echo -e "${CYAN}=== Fail2ban Settings ===${RESET}"
       echo "1. Установить Fail2ban"
-      echo "2. Проверить статус Fail2ban"
+      echo "2. Статус Fail2ban"
       echo "3. Сконфигурировать Fail2ban для nginx"
       echo "4. Сконфигурировать Fail2ban для ssh"
-      echo "5. Проверить статус Fail2ban client для nginx"
+      echo "5. Статус Fail2ban client для nginx"
+      echo "6. Статус Fail2ban client для ssh"
+      echo "7. Читать лог Fail2ban"
       echo "0. Назад в главное меню"
       read -rp "Выберите действие [1-4]: " CHOICE
 
@@ -164,6 +194,8 @@ fail2ban_settings_menu() {
           3) fail2ban_configure_nginx ;;
           4) fail2ban_configure_ssh ;;
           5) check_status_fail2ban_nginx ;;
+          6) check_status_fail2ban_ssh ;;
+          7) fail2ban_log ;;
           0) break ;;
           *) echo "Неверный выбор. Пожалуйста, попробуйте снова." ;;
       esac
