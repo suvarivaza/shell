@@ -83,15 +83,17 @@ function install_fail2ban() {
 }
 
 function check_status_fail2ban() {
+    echo -e "${CYAN}========== Проверяем статус Fail2ban ==========${RESET}"
     sudo systemctl status fail2ban
 }
 
 function check_status_fail2ban_nginx() {
+    echo -e "${CYAN}========== Настраиваем Fail2ban для ssh.. ==========${RESET}"
     sudo fail2ban-client status nginx-badbots
 }
 
 function fail2ban_configure_nginx() {
-    echo -e "${CYAN}========== Настраиваем Fail2ban для nginx.. ==========${RESET}"
+    echo -e "${CYAN}========== Проверяем статус Fail2ban client для nginx.. ==========${RESET}"
 
     # Создание фильтра
     sudo tee "$NGINX_FILTER" > /dev/null <<EOF
@@ -218,7 +220,7 @@ while true; do
   echo
   echo "=== Главное меню ==="
   echo "1. SSH Settings"
-  echo "2. fail2ban Settings"
+  echo "2. Fil2ban Settings"
   echo "3. User Settings"
   echo "0. Выход"
   echo
@@ -236,27 +238,4 @@ while true; do
   esac
 done
 
-# Меню
-#while true; do
-#  echo
-#  echo "Выберите действие:"
-#  echo "1. Проверить SSH настройки"
-#  echo "2. Заблокировать доступ к SSH по паролю"
-#  echo "3. Открыть доступ к SSH по паролю"
-#  echo "4. Попробовать подключится к SSH по паролю"
-#  echo "0. Выход"
-#  echo
-#  read -p "Введите номер действия: " CHOICE
-#
-#  case $CHOICE in
-#  1) check_ssh_settings ;;
-#  2) block_ssh_access_by_password ;;
-#  3) open_ssh_access_by_password ;;
-#  4) check_ssh_connection_by_password ;;
-#  0)
-#    echo "Выход."
-#    exit 0
-#    ;;
-#  *) echo "Неверный выбор. Пожалуйста, попробуйте снова." ;;
-#  esac
-#done
+
