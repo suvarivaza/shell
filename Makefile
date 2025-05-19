@@ -19,10 +19,10 @@ unzip-archive: ## unzip archive tar.gz
 	tar -xvf site.tar.gz -C ./$(LOCAL_PATH_SITE)
 
 download-files: ## download archive gzip by ssh and unzip immediately
-	ssh $(server) 'cd $(REMOTE_PATH_SITE) && tar $(EXCLUDE_PATH) -vczf - ./' | tar  xzf -
+	ssh $(server) 'cd $(REMOTE_PATH_SITE) && tar $(EXCLUDE_PATH) -vczf - ./' | tar xzf - -C $(LOCAL_PATH_SITE)
 
 download-folder: ## download files from specific dir by ssh: make download-folder folder=storage/ai_images
-	ssh $(server) 'cd $(REMOTE_PATH_SITE) && tar -vczf - $(folder)' | tar  xzf -
+	ssh $(server) 'cd $(REMOTE_PATH_SITE) && tar -vczf - $(folder)' | tar xzf - -C $(LOCAL_PATH_SITE)
 
 
 #=== DATABASE ===# ## Для работы с базой
