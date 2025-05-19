@@ -32,12 +32,11 @@ download-db: ## download db dump by ssh
 	gunzip db.sql.gz
 
 download-db-dev:
-	ssh $(server) "mysqldump -u $(DB_USER) -p $(DB_NAME) --where='true limit 100000' | gzip" > db.sql.gz
+	ssh $(server) "mysqldump -u $(DB_USER) -p $(DB_NAME) --where='true limit 10000' | gzip" > db.sql.gz
 	gunzip db.sql.gz
 
 import-db:
 	ssh $(server) "mysql -u $(DB_USER) -p $(DB_NAME) < db.sql"
-
 
 
 #=== SERVICE COMMANDS ===# ## Сервисные команды (предварительно нужно подключится к серверу: make ssh-connect)

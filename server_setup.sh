@@ -73,6 +73,8 @@ create_new_user() {
 
 # основной конфиг /etc/fail2ban/jail.conf
 # дополнительный локальный конфиг /etc/fail2ban/jail.local
+# sudo iptables -L -n --line-numbers #показать все правила iptables.
+# iptables -D INPUT 7 #удалить правило в строке 7
 
 JAIL_LOCAL="/etc/fail2ban/jail.local"
 NGINX_FILTER="/etc/fail2ban/filter.d/nginx-badbots.conf"
