@@ -12,7 +12,7 @@ CYAN='\033[0;36m'
 RESET='\033[0m'  # Reset to default color
 
 
-prompt_log_file() {
+function prompt_log_file() {
     read -p "Введите путь до файла access.log: " LOG_FILE
     if [[ ! -f $LOG_FILE ]]; then
         echo "Файл $LOG_FILE не найден! Убедитесь, что путь указан правильно."
@@ -21,30 +21,30 @@ prompt_log_file() {
 }
 
 
-find_access_log(){
+function find_access_log(){
   sudo find / -type f -name "*access.log" 2>/dev/null
 }
 
-read_access_log() {
-    tail -f $LOG_FILE
+function read_access_log() {
+    tail -f -n 100 $LOG_FILE
 }
 
-show_top_ips() {
+function show_top_ips() {
     echo -e "${CYAN}==================== Топ IP адресов по нагрузке ====================${RESET}"
     awk '{print $1}' "$LOG_FILE" | sort | uniq -c | sort -rn | head -n 10
 }
 
-show_top_urls() {
+function show_top_urls() {
     echo -e "${CYAN}==================== Топ URL, к которым происходит обращение ====================${RESET}"
     awk '{print $7}' "$LOG_FILE" | sort | uniq -c | sort -rn | head -n 10
 }
 
-show_top_user_agents() {
+function show_top_user_agents() {
     echo -e "${CYAN}==================== Топ User-Agent ====================${RESET}"
     awk -F\" '{print $6}' "$LOG_FILE" | sort | uniq -c | sort -rn | head -n 10
 }
 
-show_top_bots() {
+function show_top_bots() {
     echo -e "${CYAN}==================== Топ ботов, сканирующих сайт ====================${RESET}"
     awk -F\" '{if ($6 ~ /bot|spider|crawler|crawl/i) print $6}' "$LOG_FILE" | sort | uniq -c | sort -rn | head -n 10
 }
@@ -136,7 +136,7 @@ function disk_usage {
 }
 
 
-detect_server_load_source() {
+function detect_server_load_source() {
     echo -e "${CYAN}==================== Определение источника нагрузки ====================${RESET}"
     CPU_LOAD=$(awk '{print $1}' /proc/loadavg)
     echo -e "${GREEN}Текущая загрузка CPU: ${RESET} ${CPU_LOAD}"
@@ -156,7 +156,7 @@ detect_server_load_source() {
     fi
 }
 
-analyze_database() {
+function analyze_database() {
     echo -e "${CYAN}==================== Анализ работы базы данных ====================${RESET}"
     echo
     echo "Подключенные пользователи и текущие запросы (MySQL):"
