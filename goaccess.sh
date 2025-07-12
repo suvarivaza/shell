@@ -36,7 +36,7 @@ uncomment_goaccess_config() {
 
   sudo sed -i 's|^#time-format %H:%M:%S|time-format %H:%M:%S|' $conf &&
   sudo sed -i 's|^#date-format %d/%b/%Y|date-format %d/%b/%Y|' $conf &&
-  sudo sed -i '/#log-format %h %\^ \[%d:%t %\^] "%r" %s %b "%R" "%u"/s/^#//' "$conf"
+  sudo sed -i '/^#log-format %h %\^ \[%d:%t %\^] "/s/^#//' "$conf"
 
   if [ $? -eq 0 ]; then
     echo "GoAccess config successfully updated."
