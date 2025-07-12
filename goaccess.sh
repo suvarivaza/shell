@@ -65,7 +65,7 @@ while true; do
         1) find_access_log ;;
         2) [[ -z "$ACCESS_LOG_FILE" ]] && prompt_log_file; read_access_log ;;
         3) [[ -z "$ACCESS_LOG_FILE" ]] && prompt_log_file; install_goaccess ;;
-        4) [[ -z "$ACCESS_LOG_FILE" ]] && run_goaccess ;;
+        4) [[ -z "$ACCESS_LOG_FILE" ]] && prompt_log_file; run_goaccess ;;
         0) echo "Выход."; exit 0 ;;
         *) echo "Неверный выбор. Пожалуйста, попробуйте снова." ;;
     esac
