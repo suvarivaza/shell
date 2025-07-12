@@ -1,7 +1,7 @@
 #!/bin/bash
 
 
-function prompt_log_file() {
+prompt_log_file() {
     read -p "Введите путь до файла access.log: " ACCESS_LOG_FILE
     if [[ ! -f $ACCESS_LOG_FILE ]]; then
         echo "Файл $$ACCESS_LOG_FILE не найден! Убедитесь, что путь указан правильно."
@@ -9,21 +9,37 @@ function prompt_log_file() {
     fi
 }
 
-function find_access_log(){
+find_access_log(){
   sudo find / -type f -name "*access.log" 2>/dev/null
 }
 
-function read_access_log() {
+read_access_log() {
     tail -f -n 100 $ACCESS_LOG_FILE
 }
 
-function install_goaccess() {
+install_goaccess() {
     sudo apt update &&
     sudo apt install goaccess &&
-    echo "Отредактируйте конфиг: vi /etc/goaccess/goaccess.conf (раскомментируй строки: time-format date-format log-format) после этого можно запускать goaccess"
+    uncomment_goaccess_config
 }
 
-function run_goaccess() {
+
+uncomment_goaccess_config() {
+  local conf="/etc/goaccess/goaccess.conf"
+
+  sudo sed -i 's|^#time-format %H:%M:%S|time-format %H:%M:%S|' $conf &&
+  sudo sed -i 's|^#date-format %d/%b/%Y|date-format %d/%b/%Y|' $conf &&
+  sudo sed -i 's|^#log-format %h %\[%d:%t %\] "%r" %s %b "%R" "%u"|log-format %h %\[%d:%t %\] "%r" %s %b "%R" "%u"|' $conf
+
+  if [ $? -eq 0 ]; then
+    echo "GoAccess config successfully updated."
+  else
+    echo "Failed to update GoAccess config $conf" >&2
+  fi
+}
+
+
+run_goaccess() {
     sudo goaccess $ACCESS_LOG_FILE
 }
 
