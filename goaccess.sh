@@ -27,9 +27,16 @@ install_goaccess() {
 uncomment_goaccess_config() {
   local conf="/etc/goaccess/goaccess.conf"
 
+
+#раскоментируем 3 строки:
+#time-format %H:%M:%S
+#date-format %d/%b/%Y
+#log-format %h %^[%d:%t %^] "%r" %s %b "%R" "%u"
+
+
   sudo sed -i 's|^#time-format %H:%M:%S|time-format %H:%M:%S|' $conf &&
   sudo sed -i 's|^#date-format %d/%b/%Y|date-format %d/%b/%Y|' $conf &&
-  sudo sed -i 's|^#log-format %h %\[%d:%t %\] "%r" %s %b "%R" "%u"|log-format %h %\[%d:%t %\] "%r" %s %b "%R" "%u"|' $conf
+  sudo sed -i '/#log-format %h %\^ \[%d:%t %\^] "%r" %s %b "%R" "%u"/s/^#//' "$conf"
 
   if [ $? -eq 0 ]; then
     echo "GoAccess config successfully updated."
