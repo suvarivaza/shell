@@ -48,7 +48,7 @@ uncomment_goaccess_config() {
 
 
 run_goaccess() {
-    sudo goaccess $ACCESS_LOG_FILE
+    sudo goaccess $ACCESS_LOG_FILE -p /etc/goaccess/goaccess.conf
 }
 
 while true; do
