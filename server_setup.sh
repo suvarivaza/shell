@@ -10,13 +10,18 @@ RESET='\033[0m' # Reset to default color
 
 ######### SSH Settings ########
 
-check_ssh_settings() {
+check_ssh_settings_old() {
   echo -e "${CYAN}==================== Проверяем текущие SSH настройки ====================${RESET}"
   echo -e "${GREEN}Выполняю: grep PubkeyAuthentication /etc/ssh/sshd_config && grep PasswordAuthentication /etc/ssh/sshd_config ${RESET}"
   grep PubkeyAuthentication /etc/ssh/sshd_config && grep PasswordAuthentication /etc/ssh/sshd_config
 }
 
-block_ssh_access_by_password() {
+check_ssh_settings() {
+  echo -e "${CYAN}==== Эффективные настройки SSH ====${RESET}"
+  sudo sshd -T | grep -E 'passwordauthentication|pubkeyauthentication|kbdinteractiveauthentication'
+}
+
+block_ssh_access_by_password_old() {
   echo -e "${CYAN}==================== Блокируем доступ к SSH по паролю ====================${RESET}"
 
   sudo sed -i 's/^#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config &&
@@ -28,7 +33,21 @@ block_ssh_access_by_password() {
   restart_ssh && check_ssh_settings
 }
 
-open_ssh_access_by_password() {
+block_ssh_access_by_password() {
+  echo -e "${CYAN}==== Блокируем доступ к SSH по паролю ====${RESET}"
+
+  sudo tee /etc/ssh/sshd_config.d/99-custom.conf > /dev/null <<EOF
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+EOF
+
+  restart_ssh
+  check_ssh_settings
+}
+
+open_ssh_access_by_password_old() {
   echo -e "${CYAN}==================== Открываем доступ к SSH по паролю ====================${RESET}"
 
   sudo sed -i 's/^#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config &&
@@ -37,7 +56,19 @@ open_ssh_access_by_password() {
   restart_ssh && check_ssh_settings
 }
 
-check_ssh_connection_by_password() {
+open_ssh_access_by_password() {
+  echo -e "${CYAN}==== Разрешаем доступ к SSH по паролю ====${RESET}"
+
+  sudo tee /etc/ssh/sshd_config.d/99-custom.conf > /dev/null <<EOF
+PubkeyAuthentication yes
+PasswordAuthentication yes
+EOF
+
+  restart_ssh
+  check_ssh_settings
+}
+
+check_ssh_connection_by_password_old() {
   echo -e "${CYAN}==================== Пробуем подключится к SSH по паролю ====================${RESET}"
 
   if ! ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no root@localhost; then
@@ -46,6 +77,20 @@ check_ssh_connection_by_password() {
     echo "⚠️ Осторожно: подключение по паролю УДАЛОСЬ!"
   fi
 
+}
+
+check_ssh_connection_by_password() {
+  echo -e "${CYAN}==== Проверка входа по паролю ====${RESET}"
+
+  if ssh -o PreferredAuthentications=password \
+         -o PubkeyAuthentication=no \
+         -o ConnectTimeout=5 \
+         root@localhost exit 2>/dev/null; then
+
+    echo "⚠️ Пароль РАБОТАЕТ — это проблема"
+  else
+    echo "✅ Пароль отключен"
+  fi
 }
 
 restart_ssh() {
