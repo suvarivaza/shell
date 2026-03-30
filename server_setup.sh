@@ -239,18 +239,15 @@ install_fail2ban() {
 }
 
 setup_fail2ban_base() {
-  echo "Configuring base jail.local..."
+  echo "Configuring fail2ban (safe mode)..."
 
-  sudo tee "$JAIL_LOCAL" >/dev/null <<EOF
+  sudo mkdir -p /etc/fail2ban/jail.d
+
+  sudo tee /etc/fail2ban/jail.d/custom.conf >/dev/null <<EOF
 [DEFAULT]
-ignoreip = 127.0.0.1/8 ::1
 bantime = 1h
 findtime = 10m
 maxretry = 3
-backend = systemd
-
-[sshd]
-enabled = true
 
 [nginx-botsearch]
 enabled = true
@@ -262,7 +259,6 @@ logpath = $NGINX_ACCESS_LOG
 EOF
 
   sudo systemctl restart fail2ban
-  echo "Fail2ban configured and restarted"
 }
 
 check_fail2ban() {
