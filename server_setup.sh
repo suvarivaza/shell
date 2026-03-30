@@ -244,11 +244,6 @@ setup_fail2ban_base() {
   sudo mkdir -p /etc/fail2ban/jail.d
 
   sudo tee /etc/fail2ban/jail.d/custom.conf >/dev/null <<EOF
-[DEFAULT]
-bantime = 1h
-findtime = 10m
-maxretry = 3
-
 [nginx-botsearch]
 enabled = true
 logpath = $NGINX_ACCESS_LOG
