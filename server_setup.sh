@@ -67,7 +67,7 @@ ChallengeResponseAuthentication no
 EOF
 
   restart_ssh
-  check_ssh_effective
+  check_ssh_settings
 }
 
 
