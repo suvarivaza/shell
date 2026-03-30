@@ -122,7 +122,7 @@ create_new_user() {
   sudo adduser "$USERNAME"
 }
 
-######### fail2ban  ########
+######### fail2ban OLD  ########
 
 # основной конфиг /etc/fail2ban/jail.conf
 # дополнительный локальный конфиг /etc/fail2ban/jail.local
@@ -133,7 +133,7 @@ JAIL_LOCAL="/etc/fail2ban/jail.local"
 NGINX_FILTER="/etc/fail2ban/filter.d/nginx-badbots.conf"
 NGINX_ACCESS_LOG="/var/log/nginx/access.log"
 
-install_fail2ban() {
+install_fail2ban_old() {
   echo -e "${CYAN}========== Устанавливаем Fail2ban... ==========${RESET}"
   echo -e "${GREEN}Выполняю: sudo apt update && sudo apt install -y fail2ban ${RESET}"
   sudo apt update && sudo apt install -y fail2ban &&
@@ -141,7 +141,7 @@ install_fail2ban() {
   check_status_fail2ban
 }
 
-fail2ban_configure_nginx() {
+fail2ban_configure_nginx_old() {
   echo -e "${CYAN}========== Проверяем статус Fail2ban client для nginx.. ==========${RESET}"
 
   # Создание фильтра
@@ -154,11 +154,16 @@ EOF
   # Добавление в jail.local
   if ! grep -q "\[nginx-badbots\]" "$JAIL_LOCAL"; then
     sudo tee -a "$JAIL_LOCAL" >/dev/null <<EOF
-
+[DEFAULT]
+ignoreip = 127.0.0.1/8 ::1
+bantime = 3600
+findtime = 600
+maxretry = 5
+backend = auto
 [nginx-badbots]
 enabled = true
 filter = nginx-badbots
-action = iptables[name=NGINX-BADBOTS, port=http, protocol=tcp]
+action = %(action_)s
 logpath = $NGINX_ACCESS_LOG
 maxretry = 1
 bantime = 86400
@@ -172,20 +177,20 @@ EOF
   sudo systemctl restart fail2ban
 }
 
-fail2ban_configure_ssh() {
+fail2ban_configure_ssh_old() {
   echo -e "${CYAN}========== Настраиваем Fail2ban для ssh.. ==========${RESET}"
 
   if ! grep -q "\[sshd\]" "$JAIL_LOCAL"; then
     sudo tee -a "$JAIL_LOCAL" >/dev/null <<EOF
-
 [sshd]
 enabled = true
 port = ssh
 filter = sshd
-logpath = /var/log/auth.log
-maxretry = 5
-bantime = 3600
-findtime = 600
+logpath = %(sshd_log)s
+backend = systemd
+maxretry = 3
+bantime = 1h
+findtime = 10m
 EOF
     echo "Конфигурация ssh добавлена в $JAIL_LOCAL"
   else
@@ -195,29 +200,89 @@ EOF
   sudo systemctl restart fail2ban
 }
 
-check_status_fail2ban() {
+check_status_fail2ban_old() {
   echo -e "${CYAN}========== Проверяем статус Fail2ban ==========${RESET}"
   echo -e "${GREEN}Выполняю: sudo systemctl status fail2ban ${RESET}"
   sudo systemctl status fail2ban
 }
 
-check_status_fail2ban_nginx() {
+check_status_fail2ban_nginx_old() {
   echo -e "${CYAN}========== Проверяем статус Fail2ban nginx ==========${RESET}"
   echo -e "${GREEN}Выполняю: sudo fail2ban-client status nginx-badbots ${RESET}"
   sudo fail2ban-client status nginx-badbots
 }
 
-check_status_fail2ban_ssh() {
+check_status_fail2ban_ssh_old() {
   echo -e "${CYAN}========== Проверяем статус Fail2ban ssh ==========${RESET}"
   echo -e "${GREEN}Выполняю: sudo fail2ban-client status sshd ${RESET}"
   sudo fail2ban-client status sshd
 }
 
-fail2ban_log() {
+fail2ban_log_old() {
   echo -e "${CYAN}========== Читаем логи Fail2ban ==========${RESET}"
   echo -e "${GREEN}Выполняю: sudo tail -n 100 -f /var/log/fail2ban.log ${RESET}"
   sudo tail -n 100 -f /var/log/fail2ban.log
 }
+
+
+
+# Fail2ban menu + setup (refined)
+
+JAIL_LOCAL="/etc/fail2ban/jail.local"
+NGINX_ACCESS_LOG="/var/log/nginx/access.log"
+
+install_fail2ban() {
+  echo "Installing Fail2ban..."
+  sudo apt update && sudo apt install -y fail2ban
+  sudo systemctl enable fail2ban
+  sudo systemctl start fail2ban
+}
+
+setup_fail2ban_base() {
+  echo "Configuring base jail.local..."
+
+  sudo tee "$JAIL_LOCAL" >/dev/null <<EOF
+[DEFAULT]
+ignoreip = 127.0.0.1/8 ::1
+bantime = 1h
+findtime = 10m
+maxretry = 3
+backend = systemd
+
+[sshd]
+enabled = true
+
+[nginx-botsearch]
+enabled = true
+logpath = $NGINX_ACCESS_LOG
+
+[nginx-noscript]
+enabled = true
+logpath = $NGINX_ACCESS_LOG
+EOF
+
+  sudo systemctl restart fail2ban
+  echo "Fail2ban configured and restarted"
+}
+
+check_fail2ban() {
+  echo "Fail2ban overall status:"
+  sudo fail2ban-client status
+}
+
+check_jail() {
+  echo "Available jails:"
+  sudo fail2ban-client status
+  echo ""
+  read -rp "Enter jail name (e.g. sshd): " jail
+  sudo fail2ban-client status "$jail"
+}
+
+fail2ban_log() {
+  sudo tail -f /var/log/fail2ban.log
+}
+
+
 
 ######### system  ########
 
@@ -339,27 +404,24 @@ network_menu() {
 fail2ban_settings_menu() {
   while true; do
     echo ""
-    echo -e "${CYAN}=== Fail2ban menu ===${RESET}"
-    echo "1. Установить Fail2ban"
-    echo "2. Статус Fail2ban"
-    echo "3. Сконфигурировать Fail2ban для nginx"
-    echo "4. Сконфигурировать Fail2ban для ssh"
-    echo "5. Статус Fail2ban client для nginx"
-    echo "6. Статус Fail2ban client для ssh"
-    echo "7. Читать лог Fail2ban"
-    echo "0. Назад в главное меню"
-    read -rp "Выберите действие [1-4]: " CHOICE
+    echo "=== Fail2ban menu ==="
+    echo "1. Install Fail2ban"
+    echo "2. Status (all)"
+    echo "3. Status (specific jail)"
+    echo "4. Setup (nginx + ssh)"
+    echo "5. View logs"
+    echo "0. Back"
+
+    read -rp "Choose [0-5]: " CHOICE
 
     case $CHOICE in
-    1) install_fail2ban ;;
-    2) check_status_fail2ban ;;
-    3) fail2ban_configure_nginx ;;
-    4) fail2ban_configure_ssh ;;
-    5) check_status_fail2ban_nginx ;;
-    6) check_status_fail2ban_ssh ;;
-    7) fail2ban_log ;;
-    0) break ;;
-    *) echo "Неверный выбор. Пожалуйста, попробуйте снова." ;;
+      1) install_fail2ban ;;
+      2) check_fail2ban ;;
+      3) check_jail ;;
+      4) setup_fail2ban_base ;;
+      5) fail2ban_log ;;
+      0) break ;;
+      *) echo "Invalid option" ;;
     esac
   done
 }
