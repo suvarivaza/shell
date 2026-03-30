@@ -64,6 +64,7 @@ PubkeyAuthentication yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
+UsePAM no
 EOF
 
   restart_ssh
