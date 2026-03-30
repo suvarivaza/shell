@@ -8,17 +8,12 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 RESET='\033[0m' # Reset to default color
 
-######### SSH Settings ########
+######### SSH Settings OLD ########
 
 check_ssh_settings_old() {
   echo -e "${CYAN}==================== Проверяем текущие SSH настройки ====================${RESET}"
   echo -e "${GREEN}Выполняю: grep PubkeyAuthentication /etc/ssh/sshd_config && grep PasswordAuthentication /etc/ssh/sshd_config ${RESET}"
   grep PubkeyAuthentication /etc/ssh/sshd_config && grep PasswordAuthentication /etc/ssh/sshd_config
-}
-
-check_ssh_settings() {
-  echo -e "${CYAN}==== Эффективные настройки SSH ====${RESET}"
-  sudo sshd -T | grep -E 'passwordauthentication|pubkeyauthentication|kbdinteractiveauthentication'
 }
 
 block_ssh_access_by_password_old() {
@@ -31,6 +26,34 @@ block_ssh_access_by_password_old() {
   sudo sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config &&
   sudo sed -i 's/^PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config &&
   restart_ssh && check_ssh_settings
+}
+
+open_ssh_access_by_password_old() {
+  echo -e "${CYAN}==================== Открываем доступ к SSH по паролю ====================${RESET}"
+
+  sudo sed -i 's/^#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config &&
+  sudo sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config &&
+  sudo sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config &&
+  restart_ssh && check_ssh_settings
+}
+
+check_ssh_connection_by_password_old() {
+  echo -e "${CYAN}==================== Пробуем подключится к SSH по паролю ====================${RESET}"
+
+  if ! ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no root@localhost; then
+    echo "✅ Проверка пройдена: подключение по паролю не удалось, как и должно быть."
+  else
+    echo "⚠️ Осторожно: подключение по паролю УДАЛОСЬ!"
+  fi
+
+}
+
+######### SSH Settings ########
+
+
+check_ssh_settings() {
+  echo -e "${CYAN}==== Эффективные настройки SSH ====${RESET}"
+  sudo sshd -T | grep -E 'passwordauthentication|pubkeyauthentication|kbdinteractiveauthentication'
 }
 
 block_ssh_access_by_password() {
@@ -47,14 +70,6 @@ EOF
   check_ssh_settings
 }
 
-open_ssh_access_by_password_old() {
-  echo -e "${CYAN}==================== Открываем доступ к SSH по паролю ====================${RESET}"
-
-  sudo sed -i 's/^#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config &&
-  sudo sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config &&
-  sudo sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config &&
-  restart_ssh && check_ssh_settings
-}
 
 open_ssh_access_by_password() {
   echo -e "${CYAN}==== Разрешаем доступ к SSH по паролю ====${RESET}"
@@ -66,17 +81,6 @@ EOF
 
   restart_ssh
   check_ssh_settings
-}
-
-check_ssh_connection_by_password_old() {
-  echo -e "${CYAN}==================== Пробуем подключится к SSH по паролю ====================${RESET}"
-
-  if ! ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no root@localhost; then
-    echo "✅ Проверка пройдена: подключение по паролю не удалось, как и должно быть."
-  else
-    echo "⚠️ Осторожно: подключение по паролю УДАЛОСЬ!"
-  fi
-
 }
 
 check_ssh_connection_by_password() {
@@ -103,6 +107,10 @@ restart_ssh() {
   else
     echo "Unknown OS, SSH restart command not executed."
   fi
+}
+
+find_ssh_configs(){
+  grep -R "PasswordAuthentication" /etc/ssh/
 }
 
 ######### User ########
@@ -365,6 +373,7 @@ ssh_settings_menu() {
     echo "2. Заблокировать доступ к SSH по паролю"
     echo "3. Открыть доступ к SSH по паролю"
     echo "4. Попробовать подключиться к SSH по паролю"
+    echo "5. Найти SSH конфиги"
     echo "0. Назад в главное меню"
     echo
     read -p "Выберите действие: " CHOICE
@@ -374,7 +383,7 @@ ssh_settings_menu() {
     2) block_ssh_access_by_password ;;
     3) open_ssh_access_by_password ;;
     4) check_ssh_connection_by_password ;;
-    5) check_status_fail2ban_nginx ;;
+    5) find_ssh_configs ;;
     0) break ;;
     *) echo "Неверный выбор. Пожалуйста, попробуйте снова." ;;
     esac
