@@ -19,7 +19,7 @@ uncomment_goaccess_config() {
   local conf="/etc/goaccess/goaccess.conf"
 
 
-#раскоментируем 3 строки:
+#need to uncomment 3 string in config:
 #time-format %H:%M:%S
 #date-format %d/%b/%Y
 #log-format %h %^[%d:%t %^] "%r" %s %b "%R" "%u"
@@ -44,16 +44,16 @@ run_goaccess() {
 
 while true; do
     echo
-    echo "Выберите действие:"
-    echo "1. Установить goaccess"
-    echo "2. Запустить goaccess"
-    echo "0. Выход"
-    read -p "Введите номер действия: " CHOICE
+    echo "Menu:"
+    echo "1. Install goaccess"
+    echo "2. Run goaccess"
+    echo "0. Exit"
+    read -p "Enter the action number: " CHOICE
 
     case $CHOICE in
         1) [[ -z "$ACCESS_LOG_FILE" ]] && prompt_log_file; install_goaccess ;;
         2) [[ -z "$ACCESS_LOG_FILE" ]] && prompt_log_file; run_goaccess ;;
-        0) echo "Выход."; exit 0 ;;
-        *) echo "Неверный выбор. Пожалуйста, попробуйте снова." ;;
+        0) echo "Exit."; exit 0 ;;
+        *) echo "Wrong number. Please try again.." ;;
     esac
 done
