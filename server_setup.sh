@@ -448,18 +448,153 @@ rules_iptables() {
   sudo iptables -L -n --line-numbers
 }
 
+setup_iptables_persistence() {
+  local -a required_packages=("iptables-persistent")
+  local -a missing_packages=()
+  local package_name
+
+  # Правила ISPmanager могут ссылаться на динамические наборы ipset. В таком
+  # случае наборы необходимо восстанавливать раньше правил IPv4 и IPv6.
+  if sudo iptables-save | grep -q -- '--match-set' ||
+     sudo ip6tables-save | grep -q -- '--match-set'; then
+    required_packages+=("ipset-persistent")
+  fi
+
+  for package_name in "${required_packages[@]}"; do
+    if ! dpkg-query -W -f='${Status}' "$package_name" 2>/dev/null |
+         grep -q '^install ok installed$'; then
+      missing_packages+=("$package_name")
+    fi
+  done
+
+  if ((${#missing_packages[@]} > 0)); then
+    echo "Устанавливаем пакеты для автоматического восстановления фаервола: ${missing_packages[*]}"
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_packages[@]}" || return 1
+  fi
+
+  sudo systemctl enable netfilter-persistent || return 1
+  sudo netfilter-persistent save || return 1
+
+  echo -e "${GREEN}Правила сохранены через netfilter-persistent.${RESET}"
+  echo "IPv4: /etc/iptables/rules.v4"
+  echo "IPv6: /etc/iptables/rules.v6"
+
+  if [[ -f /etc/iptables/ipsets ]]; then
+    echo "IP-наборы: /etc/iptables/ipsets"
+  fi
+
+  echo "Служба включена в автозагрузку:"
+  sudo systemctl is-enabled netfilter-persistent
+}
+
+is_valid_ipv4() {
+  local ip="$1"
+  local octet
+  local -a octets=()
+
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+
+  IFS='.' read -r -a octets <<< "$ip"
+  for octet in "${octets[@]}"; do
+    ((10#$octet >= 0 && 10#$octet <= 255)) || return 1
+  done
+}
+
+restrict_ispmanager_access() {
+  local chain_name="ISPMGR_ACCESS"
+  local detected_ip=""
+  local allowed_ip_input
+  local allowed_ip
+  local confirmation
+  local -a allowed_ips=()
+
+  echo -e "${CYAN}=== Ограничение доступа к ISPmanager ===${RESET}"
+  echo "Будет разрешён доступ к TCP-порту 1500 только с указанных IPv4-адресов."
+
+  if [[ -n "${SSH_CLIENT:-}" ]]; then
+    detected_ip="${SSH_CLIENT%% *}"
+    echo "IP текущего SSH-подключения: $detected_ip"
+  fi
+
+  read -rp "Введите разрешённые IPv4-адреса через пробел${detected_ip:+ [по умолчанию: $detected_ip]}: " allowed_ip_input
+
+  if [[ -z "$allowed_ip_input" && -n "$detected_ip" ]]; then
+    allowed_ip_input="$detected_ip"
+  fi
+
+  # Разрешаем вводить адреса как через пробел, так и через запятую.
+  allowed_ip_input="${allowed_ip_input//,/ }"
+
+  for allowed_ip in $allowed_ip_input; do
+    if ! is_valid_ipv4 "$allowed_ip"; then
+      echo -e "${RED}Некорректный IPv4-адрес: $allowed_ip. Правила не изменены.${RESET}"
+      return 1
+    fi
+    allowed_ips+=("$allowed_ip")
+  done
+
+  if ((${#allowed_ips[@]} == 0)); then
+    echo -e "${RED}Не указан ни один разрешённый IPv4-адрес. Правила не изменены.${RESET}"
+    return 1
+  fi
+
+  echo "Будут разрешены адреса: ${allowed_ips[*]}"
+  read -rp "Применить ограничение доступа к ISPmanager? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    echo "Операция отменена."
+    return 0
+  fi
+
+  # Используем отдельную цепочку, чтобы повторный запуск заменял только правила,
+  # созданные этим скриптом, и не затрагивал остальную конфигурацию INPUT.
+  if ! sudo iptables -nL "$chain_name" >/dev/null 2>&1; then
+    sudo iptables -N "$chain_name" || return 1
+  fi
+
+  sudo iptables -F "$chain_name" || return 1
+
+  # Сначала устанавливаем запрет по умолчанию. Это не оставляет порт открытым,
+  # даже если добавление одного из разрешающих правил завершится ошибкой.
+  sudo iptables -A "$chain_name" -j DROP || return 1
+
+  for allowed_ip in "${allowed_ips[@]}"; do
+    sudo iptables -I "$chain_name" 1 -s "$allowed_ip/32" -j ACCEPT || return 1
+  done
+
+  # Удаляем прежние переходы в управляемую цепочку, чтобы не создавать дубликаты.
+  while sudo iptables -C INPUT -p tcp --dport 1500 -j "$chain_name" >/dev/null 2>&1; do
+    sudo iptables -D INPUT -p tcp --dport 1500 -j "$chain_name" || return 1
+  done
+
+  sudo iptables -I INPUT 1 -p tcp --dport 1500 -j "$chain_name" || return 1
+
+  # Сохраняем правила и включаем их автоматическое восстановление после загрузки.
+  # Службу здесь не перезапускаем, чтобы не рисковать текущим SSH-подключением.
+  if ! setup_iptables_persistence; then
+    echo -e "${RED}Правила применены, но не удалось настроить их автоматическое восстановление.${RESET}"
+    return 1
+  fi
+
+  echo -e "${GREEN}Доступ к ISPmanager ограничен.${RESET}"
+  sudo iptables -L INPUT -n -v --line-numbers | grep -E "Chain|1500|$chain_name" || true
+  sudo iptables -L "$chain_name" -n -v --line-numbers
+  echo "Проверьте доступ с разрешённого IP до завершения текущей SSH-сессии."
+}
+
 # Подменю iptables
 iptables_menu() {
   while true; do
     echo
-    echo -e "${CYAN}=== SSH menu ===${RESET}"
+    echo -e "${CYAN}=== Фаервол iptables ===${RESET}"
     echo "1. Список правил iptables"
+    echo "2. Ограничить доступ к ISPmanager по IP"
     echo "0. Назад в главное меню"
     echo
     read -p "Выберите действие: " CHOICE
 
     case $CHOICE in
     1) rules_iptables ;;
+    2) restrict_ispmanager_access ;;
     0) break ;;
     *) echo "Неверный выбор. Пожалуйста, попробуйте снова." ;;
     esac
