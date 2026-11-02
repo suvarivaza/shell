@@ -415,6 +415,32 @@ create_admin_user() {
 NGINX_ACCESS_LOG="/var/log/nginx/access.log"
 EXIM_LOG="/var/log/exim4/mainlog"
 FAIL2BAN_CONFIG="/etc/fail2ban/jail.d/99-server-setup.conf"
+FAIL2BAN_ISPMANAGER_CONFIG="/etc/fail2ban/jail.local"
+
+show_fail2ban_configs() {
+  local config_file
+
+  echo -e "${CYAN}=== Файлы конфигурации Fail2Ban ===${RESET}"
+  for config_file in "$FAIL2BAN_ISPMANAGER_CONFIG" "$FAIL2BAN_CONFIG"; do
+    echo
+    echo "Файл: $config_file"
+    if sudo test -f "$config_file"; then
+      show_command sudo sed -n 1,240p "$config_file"
+      sudo sed -n '1,240p' "$config_file"
+    else
+      echo "Файл отсутствует."
+    fi
+  done
+
+  if command -v fail2ban-client >/dev/null 2>&1; then
+    echo
+    echo -e "${CYAN}=== Проверка конфигурации и активные jail ===${RESET}"
+    show_command sudo fail2ban-client -t
+    sudo fail2ban-client -t || true
+    show_command sudo fail2ban-client status
+    sudo fail2ban-client status || true
+  fi
+}
 
 install_fail2ban() {
   local confirmation
@@ -435,6 +461,7 @@ install_fail2ban() {
   run_command sudo systemctl enable --now fail2ban || return 1
   sudo systemctl is-active --quiet fail2ban || return 1
   echo -e "${GREEN}Fail2Ban установлен, включён в автозагрузку и запущен.${RESET}"
+  show_fail2ban_configs
 }
 
 setup_fail2ban_base() {
@@ -524,7 +551,7 @@ EOF
   fi
 
   echo -e "${GREEN}Конфигурация Fail2Ban применена.${RESET}"
-  sudo fail2ban-client status
+  show_fail2ban_configs
 }
 
 check_fail2ban() {
@@ -1136,9 +1163,10 @@ fail2ban_settings_menu() {
     echo "3. Показать статус определённого jail"
     echo "4. Настроить защиту SSH и доступные фильтры Nginx"
     echo "5. Смотреть журнал"
+    echo "6. Показать файлы конфигурации и активные jail"
     echo "0. Назад"
 
-    read -rp "Выберите действие [0-5]: " CHOICE
+    read -rp "Выберите действие [0-6]: " CHOICE
 
     case $CHOICE in
       1) install_fail2ban ;;
@@ -1146,6 +1174,7 @@ fail2ban_settings_menu() {
       3) check_jail ;;
       4) setup_fail2ban_base ;;
       5) fail2ban_log ;;
+      6) show_fail2ban_configs ;;
       0) break ;;
       *) echo "Неверный выбор." ;;
     esac
