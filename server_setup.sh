@@ -671,7 +671,7 @@ system_log() {
 security_service_inventory() {
   local service_name
   local -a services=(
-    ssh sshd nginx apache2
+    ssh sshd nginx apache2 docker
     proftpd vsftpd pure-ftpd telnet telnet.socket
     mysql mariadb postgresql redis-server
     exim4 postfix dovecot
@@ -833,7 +833,7 @@ collect_security_report() {
 
   echo
   echo -e "${BLUE}Службы безопасности и сетевые службы:${RESET}"
-  for service_name in ssh sshd nginx fail2ban netfilter-persistent proftpd; do
+  for service_name in ssh sshd nginx docker fail2ban netfilter-persistent proftpd; do
     if systemd_unit_exists "$service_name"; then
       printf '%-24s active=%-10s enabled=%s\n' \
         "$service_name" \
@@ -1556,6 +1556,156 @@ remove_ispmanager_allowed_ip() {
   list_ispmanager_access
 }
 
+######### Docker ########
+
+docker_status() {
+  echo -e "${CYAN}=== Состояние Docker ===${RESET}"
+
+  if command -v docker >/dev/null 2>&1; then
+    show_command docker --version
+    docker --version
+    show_command docker compose version
+    docker compose version || true
+  else
+    echo "Docker не установлен."
+  fi
+
+  if systemd_unit_exists docker.service; then
+    show_command sudo systemctl status docker --no-pager
+    sudo systemctl status docker --no-pager || true
+  else
+    echo "Служба docker.service не найдена."
+  fi
+}
+
+install_docker() {
+  local confirmation
+
+  show_command_plan_header
+  show_command sudo apt-get update
+  show_command sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2
+  show_command sudo systemctl enable --now docker
+  read -rp "Установить или обновить Docker и Docker Compose v2? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    echo "Операция отменена. Пакеты и служба Docker не изменены."
+    return 0
+  fi
+
+  run_command sudo apt-get update || return 1
+  run_command sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2 || return 1
+  run_command sudo systemctl enable --now docker || return 1
+  sudo systemctl is-active --quiet docker || {
+    echo -e "${RED}Служба Docker не запущена.${RESET}"
+    return 1
+  }
+
+  docker_status
+}
+
+upgrade_docker() {
+  local confirmation
+  local -a docker_packages=("docker.io")
+
+  if ! dpkg-query -W -f='${Status}' docker.io 2>/dev/null | grep -q '^install ok installed$'; then
+    echo -e "${RED}Пакет docker.io не установлен. Сначала выполните установку Docker.${RESET}"
+    return 1
+  fi
+
+  if dpkg-query -W -f='${Status}' docker-compose-v2 2>/dev/null | grep -q '^install ok installed$'; then
+    docker_packages+=("docker-compose-v2")
+  fi
+
+  show_command_plan_header
+  show_command sudo apt-get update
+  show_command sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade "${docker_packages[@]}"
+  read -rp "Обновить установленные пакеты Docker до доступных пакетных версий? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    echo "Операция отменена. Пакеты Docker не изменены."
+    return 0
+  fi
+
+  run_command sudo apt-get update || return 1
+  run_command sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade "${docker_packages[@]}" || return 1
+  echo "Автоматический перезапуск Docker не выполнялся, чтобы не прерывать работающие контейнеры."
+  docker_status
+}
+
+configure_docker_user_access() {
+  local username
+  local add_docker
+  local add_sudo
+  local confirmation
+
+  read -rp "Введите имя существующего пользователя: " username
+  if [[ ! "$username" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || ! getent passwd "$username" >/dev/null; then
+    echo -e "${RED}Пользователь $username не найден или его имя недопустимо.${RESET}"
+    return 1
+  fi
+
+  if ! getent group docker >/dev/null; then
+    echo -e "${RED}Группа docker не найдена. Сначала установите Docker.${RESET}"
+    return 1
+  fi
+
+  echo -e "${YELLOW}Членство в группе docker позволяет управлять контейнерами и фактически даёт привилегии уровня root.${RESET}"
+  read -rp "Добавить пользователя $username в группу docker? [y/N]: " add_docker
+  read -rp "Добавить пользователя $username в группу sudo? [y/N]: " add_sudo
+
+  if [[ ! "$add_docker" =~ ^[YyДд]$ && ! "$add_sudo" =~ ^[YyДд]$ ]]; then
+    echo "Операция отменена. Группы пользователя не изменены."
+    return 0
+  fi
+
+  show_command_plan_header
+  if [[ "$add_docker" =~ ^[YyДд]$ ]]; then
+    show_command sudo usermod -aG docker "$username"
+  fi
+  if [[ "$add_sudo" =~ ^[YyДд]$ ]]; then
+    show_command sudo usermod -aG sudo "$username"
+  fi
+  show_command id "$username"
+
+  read -rp "Для применения указанных изменений введите точное имя пользователя '$username': " confirmation
+  if [[ "$confirmation" != "$username" ]]; then
+    echo "Подтверждение не получено. Группы пользователя не изменены."
+    return 0
+  fi
+
+  if [[ "$add_docker" =~ ^[YyДд]$ ]]; then
+    run_command sudo usermod -aG docker "$username" || return 1
+  fi
+  if [[ "$add_sudo" =~ ^[YyДд]$ ]]; then
+    run_command sudo usermod -aG sudo "$username" || return 1
+  fi
+
+  show_command id "$username"
+  id "$username"
+  echo "Новые группы начнут действовать после повторного входа пользователя в систему."
+}
+
+docker_menu() {
+  while true; do
+    echo
+    echo -e "${CYAN}=== Docker ===${RESET}"
+    echo "1. Проверить Docker, Compose и состояние службы"
+    echo "2. Установить Docker и Docker Compose v2"
+    echo "3. Обновить установленные пакеты Docker"
+    echo "4. Настроить доступ пользователя к Docker и sudo"
+    echo "0. Назад в главное меню"
+    echo
+    read -rp "Выберите действие: " CHOICE
+
+    case $CHOICE in
+      1) docker_status ;;
+      2) install_docker ;;
+      3) upgrade_docker ;;
+      4) configure_docker_user_access ;;
+      0) break ;;
+      *) echo "Неверный выбор. Пожалуйста, попробуйте снова." ;;
+    esac
+  done
+}
+
 # Подменю iptables
 iptables_menu() {
   while true; do
@@ -1600,6 +1750,7 @@ while true; do
   echo "10. Инвентаризация и отключение служб"
   echo "11. Проверка файловой системы"
   echo "12. Сохранить итоговый отчёт безопасности"
+  echo "13. Docker"
   echo "0. Выход"
   echo
   read -p "Введите номер раздела: " MAIN_CHOICE
@@ -1617,6 +1768,7 @@ while true; do
   10) services_security_menu ;;
   11) filesystem_security_audit ;;
   12) save_security_report ;;
+  13) docker_menu ;;
   0)
     echo "Выход."
     exit 0
