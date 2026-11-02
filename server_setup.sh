@@ -10,6 +10,20 @@ RESET='\033[0m'
 
 BACKUP_DIR="/root/server-setup-backups"
 SECURITY_REPORT_DIR="/root/server-security-reports"
+RESTIC_CONFIG_DIR="/etc/server-restic-backup"
+RESTIC_ENV_FILE="$RESTIC_CONFIG_DIR/restic.env"
+RESTIC_PASSWORD_FILE="$RESTIC_CONFIG_DIR/repository-password"
+RESTIC_SOURCES_FILE="$RESTIC_CONFIG_DIR/sources"
+RESTIC_EXCLUDES_FILE="$RESTIC_CONFIG_DIR/excludes"
+RESTIC_SSH_CONFIG_FILE="$RESTIC_CONFIG_DIR/ssh_config"
+RESTIC_SSH_KEY_FILE="$RESTIC_CONFIG_DIR/storage-box-key"
+RESTIC_KNOWN_HOSTS_FILE="$RESTIC_CONFIG_DIR/known_hosts"
+RESTIC_BACKUP_SCRIPT="/usr/local/sbin/server-restic-backup"
+RESTIC_MAINTENANCE_SCRIPT="/usr/local/sbin/server-restic-maintenance"
+RESTIC_BACKUP_SERVICE="server-restic-backup.service"
+RESTIC_BACKUP_TIMER="server-restic-backup.timer"
+RESTIC_MAINTENANCE_SERVICE="server-restic-maintenance.service"
+RESTIC_MAINTENANCE_TIMER="server-restic-maintenance.timer"
 
 show_command() {
   local argument
@@ -2353,6 +2367,549 @@ docker_menu() {
   done
 }
 
+######### Restic ########
+
+restic_is_configured() {
+  sudo test -s "$RESTIC_ENV_FILE" &&
+    sudo test -s "$RESTIC_PASSWORD_FILE" &&
+    sudo test -s "$RESTIC_SOURCES_FILE" &&
+    sudo test -s "$RESTIC_SSH_CONFIG_FILE" &&
+    sudo test -s "$RESTIC_SSH_KEY_FILE" &&
+    sudo test -s "$RESTIC_SSH_KEY_FILE.pub" &&
+    sudo test -s "$RESTIC_KNOWN_HOSTS_FILE"
+}
+
+restic_run() {
+  local repository
+
+  repository=$(sudo sed -n 's/^RESTIC_REPOSITORY=//p' "$RESTIC_ENV_FILE")
+  run_command sudo env \
+    RESTIC_PASSWORD_FILE="$RESTIC_PASSWORD_FILE" \
+    RESTIC_REPOSITORY="$repository" \
+    RESTIC_CACHE_DIR="/var/cache/restic" \
+    restic -o "sftp.command=ssh -F $RESTIC_SSH_CONFIG_FILE restic-storage-box -s sftp" "$@"
+}
+
+restic_status() {
+  local unit_name
+
+  echo -e "${CYAN}=== Состояние резервного копирования Restic ===${RESET}"
+  if command -v restic >/dev/null 2>&1; then
+    show_command restic version
+    restic version
+  else
+    echo "Restic не установлен."
+  fi
+
+  if restic_is_configured; then
+    echo -e "${GREEN}Конфигурация найдена в $RESTIC_CONFIG_DIR.${RESET}"
+    echo "Источники резервного копирования:"
+    sudo sed 's/^/  /' "$RESTIC_SOURCES_FILE"
+    echo "Исключения:"
+    sudo sed 's/^/  /' "$RESTIC_EXCLUDES_FILE"
+  else
+    echo "Полная конфигурация Restic ещё не создана."
+  fi
+
+  for unit_name in "$RESTIC_BACKUP_TIMER" "$RESTIC_MAINTENANCE_TIMER"; do
+    if systemd_unit_exists "$unit_name"; then
+      show_command sudo systemctl status "$unit_name" --no-pager
+      sudo systemctl status "$unit_name" --no-pager || true
+    else
+      echo "Таймер $unit_name не установлен."
+    fi
+  done
+
+  if systemd_unit_exists "$RESTIC_BACKUP_TIMER" || systemd_unit_exists "$RESTIC_MAINTENANCE_TIMER"; then
+    show_command sudo systemctl list-timers "$RESTIC_BACKUP_TIMER" "$RESTIC_MAINTENANCE_TIMER" --all --no-pager
+    sudo systemctl list-timers "$RESTIC_BACKUP_TIMER" "$RESTIC_MAINTENANCE_TIMER" --all --no-pager || true
+  fi
+}
+
+install_restic() {
+  local confirmation
+
+  show_command_plan_header
+  show_command sudo apt-get update
+  show_command sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y restic openssh-client
+  read -rp "Установить или обновить Restic и OpenSSH-клиент? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    echo "Операция отменена."
+    return 0
+  fi
+
+  run_command sudo apt-get update || return 1
+  run_command sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y restic openssh-client || return 1
+  restic version
+}
+
+configure_restic_storage_box() {
+  local storage_host storage_user repository_path server_name sources_input source_path
+  local repository_password repository_password_repeat temp_dir confirmation key_confirmation
+  local -a source_paths=()
+
+  command -v restic >/dev/null 2>&1 || {
+    echo -e "${RED}Restic не установлен. Сначала выполните пункт установки.${RESET}"
+    return 1
+  }
+
+  if sudo test -e "$RESTIC_ENV_FILE" || sudo test -e "$RESTIC_PASSWORD_FILE"; then
+    echo -e "${YELLOW}Конфигурация Restic уже существует в $RESTIC_CONFIG_DIR.${RESET}"
+    echo "Повторная настройка может заменить пароль другого репозитория и лишить доступа к его снимкам."
+    echo "Для смены назначения сначала сохраните текущую конфигурацию и удалите её вручную после проверки."
+    return 1
+  fi
+
+  read -rp "Hostname Storage Box (например, u123456.your-storagebox.de): " storage_host
+  if [[ ! "$storage_host" =~ ^[A-Za-z0-9][A-Za-z0-9.-]+$ ]]; then
+    echo -e "${RED}Некорректный hostname.${RESET}"
+    return 1
+  fi
+  read -rp "Пользователь Storage Box (например, u123456): " storage_user
+  if [[ ! "$storage_user" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo -e "${RED}Некорректное имя пользователя.${RESET}"
+    return 1
+  fi
+  read -rp "Каталог репозитория внутри Storage Box [restic]: " repository_path
+  repository_path=${repository_path:-restic}
+  repository_path=${repository_path#/}
+  if [[ ! "$repository_path" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$repository_path" == *".."* ]]; then
+    echo -e "${RED}Некорректный путь репозитория.${RESET}"
+    return 1
+  fi
+  read -rp "Короткое имя сервера для отдельного репозитория [$(hostname -s)]: " server_name
+  server_name=${server_name:-$(hostname -s)}
+  if [[ ! "$server_name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo -e "${RED}Некорректное имя сервера.${RESET}"
+    return 1
+  fi
+  repository_path="${repository_path%/}/$server_name"
+
+  echo "Введите абсолютные пути через запятую. Базы данных нужно предварительно выгружать отдельным безопасным скриптом."
+  read -rp "Пути для резервного копирования (например, /etc,/var/www): " sources_input
+  IFS=',' read -r -a source_paths <<< "$sources_input"
+  if [[ ${#source_paths[@]} -eq 0 ]]; then
+    echo -e "${RED}Не указан ни один источник.${RESET}"
+    return 1
+  fi
+  for source_path in "${source_paths[@]}"; do
+    source_path="${source_path#${source_path%%[![:space:]]*}}"
+    source_path="${source_path%${source_path##*[![:space:]]}}"
+    if [[ "$source_path" != /* ]] || [[ "$source_path" == *$'\n'* ]] || [[ "$source_path" == *$'\r'* ]] || ! sudo test -e "$source_path"; then
+      echo -e "${RED}Путь не существует или не является абсолютным: $source_path${RESET}"
+      return 1
+    fi
+    case "$source_path" in
+      /|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/run|/run/*|/var/lib/mysql|/var/lib/mysql/*|/var/lib/postgresql|/var/lib/postgresql/*)
+        echo -e "${RED}Небезопасный источник для файлового backup: $source_path${RESET}"
+        echo "Корень, виртуальные файловые системы и живые каталоги СУБД мастер не принимает."
+        return 1
+        ;;
+    esac
+  done
+
+  read -rsp "Новый пароль шифрования репозитория Restic: " repository_password
+  echo
+  read -rsp "Повторите пароль: " repository_password_repeat
+  echo
+  if [[ ${#repository_password} -lt 20 ]]; then
+    echo -e "${RED}Пароль должен содержать не менее 20 символов.${RESET}"
+    return 1
+  fi
+  if [[ "$repository_password" != "$repository_password_repeat" ]]; then
+    echo -e "${RED}Пароли не совпадают.${RESET}"
+    return 1
+  fi
+
+  echo -e "${YELLOW}Пароль Restic невозможно восстановить. Сохраните его отдельно в менеджере паролей.${RESET}"
+  echo "Будет настроен репозиторий: sftp:restic-storage-box:/./$repository_path"
+  echo "SSH будет подключаться к $storage_user@$storage_host через порт 23 отдельным ключом."
+  echo "Источники:"
+  printf '  %s\n' "${source_paths[@]}"
+  show_command_plan_header
+  show_command sudo install -d -m 700 -o root -g root "$RESTIC_CONFIG_DIR"
+  show_command sudo ssh-keygen -t ed25519 -N '' -C "restic-backup@$server_name" -f "$RESTIC_SSH_KEY_FILE"
+  show_command sudo ssh-keyscan -p 23 -H "$storage_host"
+  read -rp "Создать защищённую конфигурацию Restic для этого сервера? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    echo "Операция отменена."
+    return 0
+  fi
+
+  temp_dir=$(mktemp -d) || return 1
+  chmod 700 "$temp_dir"
+  printf '%s\n' "$repository_password" > "$temp_dir/repository-password"
+  chmod 600 "$temp_dir/repository-password"
+  printf 'RESTIC_REPOSITORY=%s\n' "sftp:restic-storage-box:/./$repository_path" > "$temp_dir/restic.env"
+  chmod 600 "$temp_dir/restic.env"
+  : > "$temp_dir/sources"
+  for source_path in "${source_paths[@]}"; do
+    source_path="${source_path#${source_path%%[![:space:]]*}}"
+    source_path="${source_path%${source_path##*[![:space:]]}}"
+    printf '%s\n' "$source_path" >> "$temp_dir/sources"
+  done
+  cat > "$temp_dir/excludes" <<'EOF'
+**/.git
+**/.cache
+**/cache
+**/tmp
+**/temp
+**/logs
+**/*.sock
+**/*.pid
+EOF
+  cat > "$temp_dir/ssh_config" <<EOF
+Host restic-storage-box
+    HostName $storage_host
+    User $storage_user
+    Port 23
+    IdentityFile $RESTIC_SSH_KEY_FILE
+    IdentitiesOnly yes
+    BatchMode yes
+    StrictHostKeyChecking yes
+    UserKnownHostsFile $RESTIC_KNOWN_HOSTS_FILE
+    ServerAliveInterval 60
+    ServerAliveCountMax 240
+EOF
+
+  run_command sudo install -d -m 700 -o root -g root "$RESTIC_CONFIG_DIR" || return 1
+  if ! sudo test -s "$RESTIC_SSH_KEY_FILE"; then
+    run_command sudo ssh-keygen -t ed25519 -N '' -C "restic-backup@$server_name" -f "$RESTIC_SSH_KEY_FILE" || return 1
+  else
+    echo "Существующий SSH-ключ сохранён: $RESTIC_SSH_KEY_FILE"
+  fi
+  run_command sudo install -m 600 -o root -g root "$temp_dir/repository-password" "$RESTIC_PASSWORD_FILE" || return 1
+  run_command sudo install -m 600 -o root -g root "$temp_dir/restic.env" "$RESTIC_ENV_FILE" || return 1
+  run_command sudo install -m 600 -o root -g root "$temp_dir/sources" "$RESTIC_SOURCES_FILE" || return 1
+  run_command sudo install -m 600 -o root -g root "$temp_dir/excludes" "$RESTIC_EXCLUDES_FILE" || return 1
+  run_command sudo install -m 600 -o root -g root "$temp_dir/ssh_config" "$RESTIC_SSH_CONFIG_FILE" || return 1
+  rm -rf "$temp_dir"
+  unset repository_password repository_password_repeat
+
+  echo -e "${CYAN}Выполняем команду:${RESET}" >&2
+  show_command sudo ssh-keyscan -p 23 -H "$storage_host"
+  sudo ssh-keyscan -p 23 -H "$storage_host" 2>/dev/null | sudo tee "$RESTIC_KNOWN_HOSTS_FILE" >/dev/null || return 1
+  run_command sudo chmod 600 "$RESTIC_KNOWN_HOSTS_FILE" || return 1
+  run_command sudo chown root:root "$RESTIC_KNOWN_HOSTS_FILE" || return 1
+  echo -e "${CYAN}Отпечатки полученных SSH host keys:${RESET}"
+  sudo ssh-keygen -lf "$RESTIC_KNOWN_HOSTS_FILE"
+  echo "Сверьте отпечатки с разделом Storage Box в Hetzner Console перед первым подключением."
+  read -rp "Если отпечатки проверены, введите ПРОВЕРЕН: " key_confirmation
+  if [[ "$key_confirmation" != "ПРОВЕРЕН" ]]; then
+    echo -e "${YELLOW}Конфигурация создана, но подключение и репозиторий не инициализированы.${RESET}"
+    return 0
+  fi
+
+  echo -e "${CYAN}Публичный ключ для добавления в Hetzner Storage Box:${RESET}"
+  sudo cat "$RESTIC_SSH_KEY_FILE.pub"
+  echo
+  echo "Добавьте этот ключ в Storage Box, затем инициализируйте репозиторий отдельным пунктом меню."
+}
+
+install_restic_public_key() {
+  local storage_host storage_user confirmation
+
+  sudo test -s "$RESTIC_SSH_CONFIG_FILE" &&
+    sudo test -s "$RESTIC_SSH_KEY_FILE.pub" &&
+    sudo test -s "$RESTIC_KNOWN_HOSTS_FILE" || {
+    echo -e "${RED}Сначала создайте конфигурацию и отдельный SSH-ключ Restic.${RESET}"
+    return 1
+  }
+  storage_host=$(sudo awk '/^[[:space:]]*HostName[[:space:]]+/ {print $2; exit}' "$RESTIC_SSH_CONFIG_FILE")
+  storage_user=$(sudo awk '/^[[:space:]]*User[[:space:]]+/ {print $2; exit}' "$RESTIC_SSH_CONFIG_FILE")
+  if [[ -z "$storage_host" || -z "$storage_user" ]]; then
+    echo -e "${RED}Не удалось прочитать адрес Storage Box из конфигурации.${RESET}"
+    return 1
+  fi
+
+  echo "Официальная команда Hetzner install-ssh-key добавляет ключ, не удаляя уже установленные ключи."
+  echo "SSH-клиент запросит пароль Storage Box. Пароль не сохраняется скриптом."
+  show_command_plan_header
+  printf '  sudo cat %q | sudo ssh -p 23 -o UserKnownHostsFile=%q -o StrictHostKeyChecking=yes %q install-ssh-key\n' \
+    "$RESTIC_SSH_KEY_FILE.pub" "$RESTIC_KNOWN_HOSTS_FILE" "$storage_user@$storage_host"
+  read -rp "Установить публичный ключ в Storage Box? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    echo "Операция отменена."
+    return 0
+  fi
+  echo -e "${CYAN}Выполняем команду:${RESET}" >&2
+  printf '  sudo cat %q | sudo ssh -p 23 -o UserKnownHostsFile=%q -o StrictHostKeyChecking=yes %q install-ssh-key\n' \
+    "$RESTIC_SSH_KEY_FILE.pub" "$RESTIC_KNOWN_HOSTS_FILE" "$storage_user@$storage_host" >&2
+  sudo cat "$RESTIC_SSH_KEY_FILE.pub" | sudo ssh -p 23 \
+    -o "UserKnownHostsFile=$RESTIC_KNOWN_HOSTS_FILE" -o StrictHostKeyChecking=yes \
+    "$storage_user@$storage_host" install-ssh-key
+}
+
+initialize_restic_repository() {
+  local confirmation
+
+  restic_is_configured || {
+    echo -e "${RED}Сначала создайте полную конфигурацию Storage Box.${RESET}"
+    return 1
+  }
+  echo "Сначала будет проверена авторизация по SSH-ключу, затем наличие репозитория Restic."
+  show_command_plan_header
+  show_command sudo sftp -F "$RESTIC_SSH_CONFIG_FILE" -b /dev/null restic-storage-box
+  show_command restic init
+  read -rp "Ключ уже добавлен в Storage Box и можно проверить подключение? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    echo "Операция отменена."
+    return 0
+  fi
+
+  run_command sudo sftp -F "$RESTIC_SSH_CONFIG_FILE" -b /dev/null restic-storage-box || {
+    echo -e "${RED}Не удалось подключиться к Storage Box по ключу.${RESET}"
+    return 1
+  }
+  if restic_run cat config >/dev/null 2>&1; then
+    echo -e "${GREEN}Репозиторий Restic уже инициализирован.${RESET}"
+    return 0
+  fi
+  restic_run init || return 1
+  echo -e "${GREEN}Репозиторий Restic инициализирован.${RESET}"
+}
+
+install_restic_timers() {
+  local temp_dir confirmation
+
+  restic_is_configured || {
+    echo -e "${RED}Сначала создайте конфигурацию Restic.${RESET}"
+    return 1
+  }
+  if ! restic_run cat config >/dev/null 2>&1; then
+    echo -e "${RED}Репозиторий ещё не инициализирован или недоступен.${RESET}"
+    echo "Сначала выполните проверку подключения и инициализацию репозитория."
+    return 1
+  fi
+  temp_dir=$(mktemp -d) || return 1
+  chmod 700 "$temp_dir"
+  cat > "$temp_dir/server-restic-backup" <<EOF
+#!/bin/bash
+set -Eeuo pipefail
+exec 9>/run/lock/server-restic-backup.lock
+flock -n 9 || exit 0
+export RESTIC_PASSWORD_FILE="$RESTIC_PASSWORD_FILE"
+export RESTIC_REPOSITORY="\$(sed -n 's/^RESTIC_REPOSITORY=//p' "$RESTIC_ENV_FILE")"
+export RESTIC_CACHE_DIR="/var/cache/restic"
+RESTIC_SFTP_COMMAND="ssh -F $RESTIC_SSH_CONFIG_FILE restic-storage-box -s sftp"
+restic -o "sftp.command=\$RESTIC_SFTP_COMMAND" backup --files-from "$RESTIC_SOURCES_FILE" --exclude-file "$RESTIC_EXCLUDES_FILE" --tag automatic
+restic -o "sftp.command=\$RESTIC_SFTP_COMMAND" forget --keep-daily 14 --keep-weekly 8 --keep-monthly 12
+EOF
+  cat > "$temp_dir/server-restic-maintenance" <<EOF
+#!/bin/bash
+set -Eeuo pipefail
+exec 9>/run/lock/server-restic-backup.lock
+flock -n 9 || exit 0
+export RESTIC_PASSWORD_FILE="$RESTIC_PASSWORD_FILE"
+export RESTIC_REPOSITORY="\$(sed -n 's/^RESTIC_REPOSITORY=//p' "$RESTIC_ENV_FILE")"
+export RESTIC_CACHE_DIR="/var/cache/restic"
+RESTIC_SFTP_COMMAND="ssh -F $RESTIC_SSH_CONFIG_FILE restic-storage-box -s sftp"
+restic -o "sftp.command=\$RESTIC_SFTP_COMMAND" check
+restic -o "sftp.command=\$RESTIC_SFTP_COMMAND" forget --keep-daily 14 --keep-weekly 8 --keep-monthly 12 --prune
+EOF
+  cat > "$temp_dir/$RESTIC_BACKUP_SERVICE" <<EOF
+[Unit]
+Description=Daily Restic backup
+Wants=network-online.target
+After=network-online.target
+[Service]
+Type=oneshot
+ExecStart=$RESTIC_BACKUP_SCRIPT
+Nice=10
+IOSchedulingClass=idle
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/cache/restic /run/lock
+EOF
+  cat > "$temp_dir/$RESTIC_BACKUP_TIMER" <<'EOF'
+[Unit]
+Description=Daily Restic backup timer
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=30m
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+  cat > "$temp_dir/$RESTIC_MAINTENANCE_SERVICE" <<EOF
+[Unit]
+Description=Weekly Restic repository maintenance
+Wants=network-online.target
+After=network-online.target
+[Service]
+Type=oneshot
+ExecStart=$RESTIC_MAINTENANCE_SCRIPT
+Nice=10
+IOSchedulingClass=idle
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/cache/restic /run/lock
+EOF
+  cat > "$temp_dir/$RESTIC_MAINTENANCE_TIMER" <<'EOF'
+[Unit]
+Description=Weekly Restic repository maintenance timer
+[Timer]
+OnCalendar=Sun *-*-* 05:30:00
+RandomizedDelaySec=30m
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+
+  if ! bash -n "$temp_dir/server-restic-backup" "$temp_dir/server-restic-maintenance"; then
+    rm -rf "$temp_dir"
+    echo -e "${RED}Сгенерированные backup-скрипты не прошли синтаксическую проверку.${RESET}"
+    return 1
+  fi
+
+  echo "Будет настроен ежедневный backup в 03:30 и еженедельное обслуживание по воскресеньям в 05:30."
+  echo "Политика хранения: 14 ежедневных, 8 еженедельных и 12 ежемесячных снимков."
+  show_command_plan_header
+  show_command sudo install -m 700 -o root -g root "$temp_dir/server-restic-backup" "$RESTIC_BACKUP_SCRIPT"
+  show_command sudo install -m 700 -o root -g root "$temp_dir/server-restic-maintenance" "$RESTIC_MAINTENANCE_SCRIPT"
+  show_command sudo install -m 644 -o root -g root "$temp_dir/$RESTIC_BACKUP_SERVICE" "/etc/systemd/system/$RESTIC_BACKUP_SERVICE"
+  show_command sudo install -m 644 -o root -g root "$temp_dir/$RESTIC_BACKUP_TIMER" "/etc/systemd/system/$RESTIC_BACKUP_TIMER"
+  show_command sudo install -m 644 -o root -g root "$temp_dir/$RESTIC_MAINTENANCE_SERVICE" "/etc/systemd/system/$RESTIC_MAINTENANCE_SERVICE"
+  show_command sudo install -m 644 -o root -g root "$temp_dir/$RESTIC_MAINTENANCE_TIMER" "/etc/systemd/system/$RESTIC_MAINTENANCE_TIMER"
+  show_command sudo systemctl daemon-reload
+  show_command sudo systemd-analyze verify "/etc/systemd/system/$RESTIC_BACKUP_SERVICE" "/etc/systemd/system/$RESTIC_BACKUP_TIMER" "/etc/systemd/system/$RESTIC_MAINTENANCE_SERVICE" "/etc/systemd/system/$RESTIC_MAINTENANCE_TIMER"
+  show_command sudo systemctl enable --now "$RESTIC_BACKUP_TIMER" "$RESTIC_MAINTENANCE_TIMER"
+  read -rp "Установить и включить systemd-таймеры Restic? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    rm -rf "$temp_dir"
+    echo "Операция отменена."
+    return 0
+  fi
+
+  run_command sudo install -d -m 700 -o root -g root /var/cache/restic || return 1
+  run_command sudo install -m 700 -o root -g root "$temp_dir/server-restic-backup" "$RESTIC_BACKUP_SCRIPT" || return 1
+  run_command sudo install -m 700 -o root -g root "$temp_dir/server-restic-maintenance" "$RESTIC_MAINTENANCE_SCRIPT" || return 1
+  run_command sudo install -m 644 -o root -g root "$temp_dir/$RESTIC_BACKUP_SERVICE" "/etc/systemd/system/$RESTIC_BACKUP_SERVICE" || return 1
+  run_command sudo install -m 644 -o root -g root "$temp_dir/$RESTIC_BACKUP_TIMER" "/etc/systemd/system/$RESTIC_BACKUP_TIMER" || return 1
+  run_command sudo install -m 644 -o root -g root "$temp_dir/$RESTIC_MAINTENANCE_SERVICE" "/etc/systemd/system/$RESTIC_MAINTENANCE_SERVICE" || return 1
+  run_command sudo install -m 644 -o root -g root "$temp_dir/$RESTIC_MAINTENANCE_TIMER" "/etc/systemd/system/$RESTIC_MAINTENANCE_TIMER" || return 1
+  rm -rf "$temp_dir"
+  run_command sudo systemctl daemon-reload || return 1
+  run_command sudo systemd-analyze verify "/etc/systemd/system/$RESTIC_BACKUP_SERVICE" "/etc/systemd/system/$RESTIC_BACKUP_TIMER" "/etc/systemd/system/$RESTIC_MAINTENANCE_SERVICE" "/etc/systemd/system/$RESTIC_MAINTENANCE_TIMER" || return 1
+  run_command sudo systemctl enable --now "$RESTIC_BACKUP_TIMER" "$RESTIC_MAINTENANCE_TIMER" || return 1
+  restic_status
+}
+
+run_restic_backup_now() {
+  local confirmation
+
+  systemd_unit_exists "$RESTIC_BACKUP_SERVICE" || {
+    echo -e "${RED}Служба $RESTIC_BACKUP_SERVICE не установлена.${RESET}"
+    return 1
+  }
+  show_command_plan_header
+  show_command sudo systemctl start "$RESTIC_BACKUP_SERVICE"
+  read -rp "Запустить резервное копирование сейчас? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    echo "Операция отменена."
+    return 0
+  fi
+  run_command sudo systemctl start "$RESTIC_BACKUP_SERVICE" || {
+    sudo journalctl -u "$RESTIC_BACKUP_SERVICE" -n 100 --no-pager
+    return 1
+  }
+  sudo journalctl -u "$RESTIC_BACKUP_SERVICE" -n 100 --no-pager
+}
+
+list_restic_snapshots() {
+  restic_is_configured || {
+    echo -e "${RED}Restic не настроен.${RESET}"
+    return 1
+  }
+  show_command restic snapshots
+  restic_run snapshots
+}
+
+check_restic_repository() {
+  local confirmation
+
+  restic_is_configured || {
+    echo -e "${RED}Restic не настроен.${RESET}"
+    return 1
+  }
+  echo "Полная проверка читает данные репозитория и может выполняться долго."
+  show_command_plan_header
+  show_command restic check
+  read -rp "Запустить полную проверку репозитория сейчас? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    echo "Операция отменена."
+    return 0
+  fi
+  restic_run check
+}
+
+test_restic_restore() {
+  local restore_path restore_target confirmation timestamp
+
+  restic_is_configured || {
+    echo -e "${RED}Restic не настроен.${RESET}"
+    return 1
+  }
+  read -rp "Абсолютный путь одного файла или каталога из снимка для теста: " restore_path
+  if [[ "$restore_path" != /* ]] || [[ "$restore_path" == *".."* ]] || [[ "$restore_path" == *$'\n'* ]]; then
+    echo -e "${RED}Нужен безопасный абсолютный путь без '..'.${RESET}"
+    return 1
+  fi
+  timestamp=$(date +%Y%m%d-%H%M%S)
+  restore_target="/root/restic-restore-tests/$timestamp"
+  echo "Последний снимок будет восстановлен только в новый каталог $restore_target."
+  echo "Рабочие файлы сервера изменяться не будут. Каталог после проверки удаляется вручную."
+  show_command_plan_header
+  show_command sudo mkdir -p "$restore_target"
+  show_command restic restore latest --target "$restore_target" --include "$restore_path"
+  read -rp "Выполнить контрольное восстановление? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    echo "Операция отменена."
+    return 0
+  fi
+  run_command sudo mkdir -p "$restore_target" || return 1
+  restic_run restore latest --target "$restore_target" --include "$restore_path" || return 1
+  echo -e "${GREEN}Контрольное восстановление завершено: $restore_target${RESET}"
+  show_command sudo find "$restore_target" -maxdepth 5 -ls
+  sudo find "$restore_target" -maxdepth 5 -ls
+}
+
+restic_menu() {
+  while true; do
+    echo
+    echo -e "${CYAN}=== Резервное копирование Restic ===${RESET}"
+    echo "1. Проверить состояние Restic и таймеров"
+    echo "2. Установить Restic"
+    echo "3. Настроить Hetzner Storage Box"
+    echo "4. Установить публичный SSH-ключ в Storage Box"
+    echo "5. Проверить подключение и инициализировать репозиторий"
+    echo "6. Установить systemd-службы и таймеры"
+    echo "7. Запустить резервное копирование сейчас"
+    echo "8. Показать снимки"
+    echo "9. Проверить целостность репозитория"
+    echo "10. Выполнить контрольное восстановление"
+    echo "0. Назад в главное меню"
+    echo
+    read -rp "Выберите действие: " CHOICE
+    case $CHOICE in
+      1) restic_status ;;
+      2) install_restic ;;
+      3) configure_restic_storage_box ;;
+      4) install_restic_public_key ;;
+      5) initialize_restic_repository ;;
+      6) install_restic_timers ;;
+      7) run_restic_backup_now ;;
+      8) list_restic_snapshots ;;
+      9) check_restic_repository ;;
+      10) test_restic_restore ;;
+      0) break ;;
+      *) echo "Неверный выбор. Пожалуйста, попробуйте снова." ;;
+    esac
+  done
+}
+
 # Подменю iptables
 iptables_menu() {
   while true; do
@@ -2400,6 +2957,7 @@ while true; do
   echo "13. Docker"
   echo "14. Logwatch"
   echo "15. GoAccess"
+  echo "16. Резервное копирование Restic"
   echo "0. Выход"
   echo
   read -p "Введите номер раздела: " MAIN_CHOICE
@@ -2420,6 +2978,7 @@ while true; do
   13) docker_menu ;;
   14) logwatch_menu ;;
   15) goaccess_menu ;;
+  16) restic_menu ;;
   0)
     echo "Выход."
     exit 0
