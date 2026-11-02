@@ -10,6 +10,44 @@ RESET='\033[0m'
 
 BACKUP_DIR="/root/server-setup-backups"
 
+show_command() {
+  local argument
+
+  printf '  '
+  for argument in "$@"; do
+    printf '%q ' "$argument"
+  done
+  printf '\n'
+}
+
+show_append_line_command() {
+  local value="$1"
+  local target_file="$2"
+
+  printf "  printf '%%s\\\\n' "
+  printf '%q' "$value"
+  printf ' | sudo tee -a %q >/dev/null\n' "$target_file"
+}
+
+show_save_command() {
+  local source_command="$1"
+  local target_file="$2"
+
+  printf '  sudo %s | sudo tee %q >/dev/null\n' "$source_command" "$target_file"
+}
+
+show_command_plan_header() {
+  echo -e "${CYAN}Будут выполнены следующие изменяющие команды:${RESET}"
+}
+
+run_command() {
+  {
+    echo -e "${CYAN}Выполняем команду:${RESET}"
+    show_command "$@"
+  } >&2
+  "$@"
+}
+
 create_backup() {
   local source_file="$1"
   local timestamp
@@ -21,8 +59,8 @@ create_backup() {
 
   timestamp=$(date +%Y%m%d-%H%M%S)
   backup_file="$BACKUP_DIR/$(basename "$source_file").$timestamp"
-  sudo mkdir -p "$BACKUP_DIR" || return 1
-  sudo cp -a "$source_file" "$backup_file" || return 1
+  run_command sudo mkdir -p "$BACKUP_DIR" || return 1
+  run_command sudo cp -a "$source_file" "$backup_file" || return 1
   echo "$backup_file"
 }
 
@@ -31,9 +69,9 @@ restore_backup() {
   local target_file="$2"
 
   if [[ -n "$backup_file" ]] && sudo test -e "$backup_file"; then
-    sudo cp -a "$backup_file" "$target_file"
+    run_command sudo cp -a "$backup_file" "$target_file"
   else
-    sudo rm -f "$target_file"
+    run_command sudo rm -f "$target_file"
   fi
 }
 
@@ -52,6 +90,14 @@ systemd_unit_exists() {
   return 1
 }
 
+get_ssh_service_name() {
+  if systemd_unit_exists sshd.service && ! systemd_unit_exists ssh.service; then
+    echo "sshd"
+  else
+    echo "ssh"
+  fi
+}
+
 ######### SSH ########
 
 
@@ -68,6 +114,7 @@ block_ssh_access_by_password() {
   local temp_file
   local confirmation
   local key_access_confirmation
+  local ssh_service_name
 
   echo -e "${CYAN}==== Блокируем доступ к SSH по паролю ====${RESET}"
 
@@ -82,6 +129,16 @@ block_ssh_access_by_password() {
   echo -e "${YELLOW}Внимание: после отключения входа по паролю подключиться к серверу можно будет только по SSH-ключу.${RESET}"
   echo "Перед продолжением откройте второй терминал и убедитесь, что новое SSH-подключение по ключу работает."
   echo "Не закрывайте текущую SSH-сессию до завершения проверки."
+  echo "Будет записан файл $config_file со значениями:"
+  echo "  PubkeyAuthentication yes"
+  echo "  PasswordAuthentication no"
+  echo "  KbdInteractiveAuthentication no"
+  echo "  ChallengeResponseAuthentication no"
+  echo "  MaxAuthTries 5"
+  ssh_service_name=$(get_ssh_service_name)
+  show_command_plan_header
+  show_command sudo sshd -t
+  show_command sudo systemctl reload "$ssh_service_name"
   read -rp "Вы точно хотите отключить вход по SSH-паролю? [y/N]: " confirmation
   if [[ ! "$confirmation" =~ ^[Yy]$ ]]; then
     echo "Операция отменена. Настройки SSH не изменены."
@@ -105,8 +162,8 @@ ChallengeResponseAuthentication no
 MaxAuthTries 5
 EOF
 
-  sudo mkdir -p /etc/ssh/sshd_config.d || return 1
-  sudo install -m 600 "$temp_file" "$config_file" || {
+  run_command sudo mkdir -p /etc/ssh/sshd_config.d || return 1
+  run_command sudo install -m 600 "$temp_file" "$config_file" || {
     rm -f "$temp_file"
     return 1
   }
@@ -142,13 +199,11 @@ check_ssh_connection_by_password() {
 }
 
 reload_ssh() {
-  local service_name="ssh"
+  local service_name
 
-  if systemd_unit_exists sshd.service && ! systemd_unit_exists ssh.service; then
-    service_name="sshd"
-  fi
+  service_name=$(get_ssh_service_name)
 
-  sudo systemctl reload "$service_name" || return 1
+  run_command sudo systemctl reload "$service_name" || return 1
   sudo systemctl is-active --quiet "$service_name" || return 1
   echo -e "${GREEN}Служба $service_name перечитала конфигурацию и остаётся активной.${RESET}"
 }
@@ -185,6 +240,7 @@ configure_root_ssh_access() {
   local confirmation
   local admin_access_confirmation
   local temp_file
+  local ssh_service_name
 
   echo "1. Разрешить root только по SSH-ключу"
   echo "2. Полностью запретить вход root по SSH"
@@ -213,6 +269,11 @@ configure_root_ssh_access() {
     fi
   fi
 
+  echo "Будет записан файл $config_file со значением: PermitRootLogin $root_mode"
+  ssh_service_name=$(get_ssh_service_name)
+  show_command_plan_header
+  show_command sudo sshd -t
+  show_command sudo systemctl reload "$ssh_service_name"
   read -rp "Применить PermitRootLogin $root_mode? [y/N]: " confirmation
   if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
     echo "Операция отменена."
@@ -222,7 +283,7 @@ configure_root_ssh_access() {
   backup_file=$(create_backup "$config_file") || return 1
   temp_file=$(mktemp) || return 1
   printf 'PermitRootLogin %s\n' "$root_mode" > "$temp_file"
-  sudo install -m 600 "$temp_file" "$config_file" || {
+  run_command sudo install -m 600 "$temp_file" "$config_file" || {
     rm -f "$temp_file"
     return 1
   }
@@ -263,13 +324,15 @@ create_new_user() {
     return 0
   fi
 
+  show_command_plan_header
+  show_command sudo adduser "$username"
   read -rp "Создать системного пользователя $username? [y/N]: " confirmation
   if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
     echo "Операция отменена. Пользователь не создан."
     return 0
   fi
 
-  sudo adduser "$username"
+  run_command sudo adduser "$username"
 }
 
 install_user_ssh_key() {
@@ -290,19 +353,26 @@ install_user_ssh_key() {
     return 1
   fi
 
+  user_home=$(getent passwd "$username" | cut -d: -f6)
+  show_command_plan_header
+  show_command sudo install -d -m 700 -o "$username" -g "$username" "$user_home/.ssh"
+  show_append_line_command "$public_key" "$user_home/.ssh/authorized_keys"
+  show_command sudo chown "$username:$username" "$user_home/.ssh/authorized_keys"
+  show_command sudo chmod 600 "$user_home/.ssh/authorized_keys"
   read -rp "Добавить указанный SSH-ключ пользователю $username? [y/N]: " confirmation
   if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
     echo "Операция отменена. SSH-ключ не изменён."
     return 0
   fi
 
-  user_home=$(getent passwd "$username" | cut -d: -f6)
-  sudo install -d -m 700 -o "$username" -g "$username" "$user_home/.ssh" || return 1
+  run_command sudo install -d -m 700 -o "$username" -g "$username" "$user_home/.ssh" || return 1
   if ! sudo grep -qxF "$public_key" "$user_home/.ssh/authorized_keys" 2>/dev/null; then
+    echo -e "${CYAN}Выполняем команду:${RESET}"
+    show_append_line_command "$public_key" "$user_home/.ssh/authorized_keys"
     printf '%s\n' "$public_key" | sudo tee -a "$user_home/.ssh/authorized_keys" >/dev/null || return 1
   fi
-  sudo chown "$username:$username" "$user_home/.ssh/authorized_keys" || return 1
-  sudo chmod 600 "$user_home/.ssh/authorized_keys" || return 1
+  run_command sudo chown "$username:$username" "$user_home/.ssh/authorized_keys" || return 1
+  run_command sudo chmod 600 "$user_home/.ssh/authorized_keys" || return 1
   echo -e "${GREEN}Ключ установлен пользователю $username.${RESET}"
 }
 
@@ -317,21 +387,25 @@ create_admin_user() {
   fi
 
   if ! getent passwd "$username" >/dev/null; then
+    show_command_plan_header
+    show_command sudo adduser "$username"
     read -rp "Создать пользователя $username? [y/N]: " confirmation
     if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
       echo "Операция отменена. Пользователь не создан."
       return 0
     fi
-    sudo adduser "$username" || return 1
+    run_command sudo adduser "$username" || return 1
   fi
 
+  show_command_plan_header
+  show_command sudo usermod -aG sudo "$username"
   read -rp "Добавить пользователя $username в группу sudo? [y/N]: " confirmation
   if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
     echo "Пользователь создан без административных прав."
     return 0
   fi
 
-  sudo usermod -aG sudo "$username" || return 1
+  run_command sudo usermod -aG sudo "$username" || return 1
   echo -e "${GREEN}Пользователь $username добавлен в группу sudo.${RESET}"
   echo "Теперь установите ему SSH-ключ и проверьте вход в отдельной сессии."
 }
@@ -345,6 +419,10 @@ FAIL2BAN_CONFIG="/etc/fail2ban/jail.d/99-server-setup.conf"
 install_fail2ban() {
   local confirmation
 
+  show_command_plan_header
+  show_command sudo apt-get update
+  show_command sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban
+  show_command sudo systemctl enable --now fail2ban
   read -rp "Установить Fail2Ban, включить его в автозагрузку и запустить? [y/N]: " confirmation
   if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
     echo "Операция отменена. Пакеты и службы не изменены."
@@ -352,9 +430,9 @@ install_fail2ban() {
   fi
 
   echo "Устанавливаем Fail2Ban..."
-  sudo apt-get update || return 1
-  sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban || return 1
-  sudo systemctl enable --now fail2ban || return 1
+  run_command sudo apt-get update || return 1
+  run_command sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban || return 1
+  run_command sudo systemctl enable --now fail2ban || return 1
   sudo systemctl is-active --quiet fail2ban || return 1
   echo -e "${GREEN}Fail2Ban установлен, включён в автозагрузку и запущен.${RESET}"
 }
@@ -370,6 +448,9 @@ setup_fail2ban_base() {
   fi
 
   echo "Будет создан или заменён управляемый файл $FAIL2BAN_CONFIG, затем Fail2Ban будет перезапущен."
+  show_command_plan_header
+  show_command sudo fail2ban-client -t
+  show_command sudo systemctl restart fail2ban
   read -rp "Применить базовую конфигурацию Fail2Ban? [y/N]: " confirmation
   if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
     echo "Операция отменена. Конфигурация Fail2Ban не изменена."
@@ -378,7 +459,7 @@ setup_fail2ban_base() {
 
   echo "Настраиваем защиту SSH и доступные фильтры Nginx..."
 
-  sudo mkdir -p /etc/fail2ban/jail.d
+  run_command sudo mkdir -p /etc/fail2ban/jail.d
   backup_file=$(create_backup "$FAIL2BAN_CONFIG") || return 1
   temp_file=$(mktemp) || return 1
 
@@ -422,7 +503,7 @@ logpath = $EXIM_LOG
 EOF
   fi
 
-  sudo install -m 640 "$temp_file" "$FAIL2BAN_CONFIG" || {
+  run_command sudo install -m 640 "$temp_file" "$FAIL2BAN_CONFIG" || {
     rm -f "$temp_file"
     return 1
   }
@@ -435,10 +516,10 @@ EOF
     return 1
   fi
 
-  if ! sudo systemctl restart fail2ban || ! sudo systemctl is-active --quiet fail2ban; then
+  if ! run_command sudo systemctl restart fail2ban || ! sudo systemctl is-active --quiet fail2ban; then
     echo -e "${RED}Fail2Ban не запустился с новой конфигурацией. Выполняем откат.${RESET}"
     restore_backup "$backup_file" "$FAIL2BAN_CONFIG"
-    sudo fail2ban-client -t && sudo systemctl restart fail2ban
+    sudo fail2ban-client -t && run_command sudo systemctl restart fail2ban
     return 1
   fi
 
@@ -484,6 +565,13 @@ setup_security_updates() {
   local confirmation
 
   echo "Будет установлен unattended-upgrades, записаны настройки APT и включены системные таймеры обновлений."
+  show_command_plan_header
+  show_command sudo apt-get update
+  show_command sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades
+  echo "  Запись управляемого файла: $UNATTENDED_CONFIG"
+  echo "  Запись управляемого файла: $UNATTENDED_ORIGINS_CONFIG"
+  show_command sudo unattended-upgrade --dry-run
+  show_command sudo systemctl enable --now apt-daily.timer apt-daily-upgrade.timer
   read -rp "Включить автоматическую установку security-обновлений? [y/N]: " confirmation
   if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
     echo "Операция отменена. Настройки автоматических обновлений не изменены."
@@ -491,8 +579,8 @@ setup_security_updates() {
   fi
 
   echo "Устанавливаем unattended-upgrades..."
-  sudo apt-get update || return 1
-  sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades || return 1
+  run_command sudo apt-get update || return 1
+  run_command sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades || return 1
 
   backup_file=$(create_backup "$UNATTENDED_CONFIG") || return 1
   origins_backup_file=$(create_backup "$UNATTENDED_ORIGINS_CONFIG") || return 1
@@ -505,7 +593,7 @@ setup_security_updates() {
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 EOF
-  sudo install -m 644 "$temp_file" "$UNATTENDED_CONFIG" || {
+  run_command sudo install -m 644 "$temp_file" "$UNATTENDED_CONFIG" || {
     rm -f "$temp_file" "$origins_temp_file"
     return 1
   }
@@ -519,7 +607,7 @@ Unattended-Upgrade::Origins-Pattern {
 };
 Unattended-Upgrade::Automatic-Reboot "false";
 EOF
-  sudo install -m 644 "$origins_temp_file" "$UNATTENDED_ORIGINS_CONFIG" || {
+  run_command sudo install -m 644 "$origins_temp_file" "$UNATTENDED_ORIGINS_CONFIG" || {
     rm -f "$origins_temp_file"
     restore_backup "$backup_file" "$UNATTENDED_CONFIG"
     return 1
@@ -533,7 +621,7 @@ EOF
     return 1
   fi
 
-  if ! sudo systemctl enable --now apt-daily.timer apt-daily-upgrade.timer; then
+  if ! run_command sudo systemctl enable --now apt-daily.timer apt-daily-upgrade.timer; then
     echo -e "${RED}Не удалось включить таймеры APT. Выполняем откат конфигурации.${RESET}"
     restore_backup "$backup_file" "$UNATTENDED_CONFIG"
     restore_backup "$origins_backup_file" "$UNATTENDED_ORIGINS_CONFIG"
@@ -639,13 +727,15 @@ disable_unneeded_service() {
   fi
 
   echo -e "${YELLOW}Остановка базы данных или почтовой службы может нарушить работу сайтов и почты.${RESET}"
+  show_command_plan_header
+  show_command sudo systemctl disable --now "$service_name"
   read -rp "Введите точное имя '$service_name' ещё раз для подтверждения: " confirmation
   if [[ "$confirmation" != "$service_name" ]]; then
     echo "Операция отменена."
     return 0
   fi
 
-  sudo systemctl disable --now "$service_name" || return 1
+  run_command sudo systemctl disable --now "$service_name" || return 1
   echo -e "${GREEN}Служба $service_name остановлена и отключена из автозагрузки.${RESET}"
   echo "Для возврата: sudo systemctl enable --now $service_name"
 }
@@ -666,13 +756,15 @@ nginx_reload() {
     return 1
   }
 
+  show_command_plan_header
+  show_command sudo systemctl reload nginx
   read -rp "Конфигурация корректна. Перечитать конфигурацию Nginx? [y/N]: " confirmation
   if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
     echo "Операция отменена. Nginx не перечитывал конфигурацию."
     return 0
   fi
 
-  sudo systemctl reload nginx || return 1
+  run_command sudo systemctl reload nginx || return 1
   sudo systemctl is-active --quiet nginx || return 1
   echo -e "${GREEN}Nginx перечитал проверенную конфигурацию и остаётся активным.${RESET}"
 }
@@ -1009,11 +1101,23 @@ backup_firewall_rules() {
 
   timestamp=$(date +%Y%m%d-%H%M%S)
   backup_path="$BACKUP_DIR/firewall-$timestamp"
-  sudo mkdir -p "$backup_path" || return 1
+  run_command sudo mkdir -p "$backup_path" || return 1
+  {
+    echo -e "${CYAN}Выполняем команду:${RESET}"
+    show_save_command iptables-save "$backup_path/rules.v4"
+  } >&2
   sudo iptables-save | sudo tee "$backup_path/rules.v4" >/dev/null || return 1
+  {
+    echo -e "${CYAN}Выполняем команду:${RESET}"
+    show_save_command ip6tables-save "$backup_path/rules.v6"
+  } >&2
   sudo ip6tables-save | sudo tee "$backup_path/rules.v6" >/dev/null || return 1
 
   if command -v ipset >/dev/null 2>&1; then
+    {
+      echo -e "${CYAN}Выполняем команду:${RESET}"
+      show_save_command "ipset save" "$backup_path/ipsets"
+    } >&2
     sudo ipset save | sudo tee "$backup_path/ipsets" >/dev/null || return 1
   fi
 
@@ -1029,10 +1133,10 @@ restore_firewall_rules() {
   fi
 
   if sudo test -s "$backup_path/ipsets" && command -v ipset >/dev/null 2>&1; then
-    sudo ipset restore -exist -file "$backup_path/ipsets" || return 1
+    run_command sudo ipset restore -exist -file "$backup_path/ipsets" || return 1
   fi
-  sudo iptables-restore "$backup_path/rules.v4" || return 1
-  sudo ip6tables-restore "$backup_path/rules.v6" || return 1
+  run_command sudo iptables-restore "$backup_path/rules.v4" || return 1
+  run_command sudo ip6tables-restore "$backup_path/rules.v6" || return 1
   echo -e "${GREEN}Активные правила восстановлены из $backup_path.${RESET}"
 }
 
@@ -1057,14 +1161,14 @@ setup_iptables_persistence() {
 
   if ((${#missing_packages[@]} > 0)); then
     echo "Устанавливаем пакеты для автоматического восстановления фаервола: ${missing_packages[*]}"
-    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_packages[@]}" || return 1
+    run_command sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_packages[@]}" || return 1
   fi
 
-  sudo systemctl enable netfilter-persistent || return 1
-  sudo netfilter-persistent save || return 1
+  run_command sudo systemctl enable netfilter-persistent || return 1
+  run_command sudo netfilter-persistent save || return 1
 
   if [[ -f /etc/iptables/ipsets ]] && command -v ipset >/dev/null 2>&1; then
-    sudo ipset restore -exist -file /etc/iptables/ipsets || return 1
+    run_command sudo ipset restore -exist -file /etc/iptables/ipsets || return 1
   fi
 
   sudo iptables-restore --test /etc/iptables/rules.v4 || return 1
@@ -1157,6 +1261,29 @@ restrict_ispmanager_access() {
   fi
 
   echo "Будут разрешены адреса: ${allowed_ips[*]}"
+  show_command_plan_header
+  if ! sudo iptables -w 5 -nL "$chain_name" >/dev/null 2>&1; then
+    show_command sudo iptables -w 5 -N "$chain_name"
+  fi
+  show_command sudo iptables -w 5 -F "$chain_name"
+  show_command sudo iptables -w 5 -A "$chain_name" -j DROP
+  for allowed_ip in "${allowed_ips[@]}"; do
+    show_command sudo iptables -w 5 -I "$chain_name" 1 -s "$allowed_ip/32" -j ACCEPT
+  done
+  if sudo iptables -w 5 -C INPUT -p tcp --dport 1500 -j "$chain_name" >/dev/null 2>&1; then
+    show_command sudo iptables -w 5 -D INPUT -p tcp --dport 1500 -j "$chain_name"
+  fi
+  show_command sudo iptables -w 5 -I INPUT 1 -p tcp --dport 1500 -j "$chain_name"
+  if ! sudo ip6tables -w 5 -nL "$chain6_name" >/dev/null 2>&1; then
+    show_command sudo ip6tables -w 5 -N "$chain6_name"
+  fi
+  show_command sudo ip6tables -w 5 -F "$chain6_name"
+  show_command sudo ip6tables -w 5 -A "$chain6_name" -j DROP
+  if sudo ip6tables -w 5 -C INPUT -p tcp --dport 1500 -j "$chain6_name" >/dev/null 2>&1; then
+    show_command sudo ip6tables -w 5 -D INPUT -p tcp --dport 1500 -j "$chain6_name"
+  fi
+  show_command sudo ip6tables -w 5 -I INPUT 1 -p tcp --dport 1500 -j "$chain6_name"
+  show_command sudo netfilter-persistent save
   read -rp "Применить ограничение доступа к ISPmanager? [y/N]: " confirmation
   if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
     echo "Операция отменена."
@@ -1172,26 +1299,26 @@ restrict_ispmanager_access() {
   # Используем отдельную цепочку, чтобы повторный запуск заменял только правила,
   # созданные этим скриптом, и не затрагивал остальную конфигурацию INPUT.
   if ! sudo iptables -w 5 -nL "$chain_name" >/dev/null 2>&1; then
-    sudo iptables -w 5 -N "$chain_name" || {
+    run_command sudo iptables -w 5 -N "$chain_name" || {
       restore_firewall_rules "$firewall_backup"
       return 1
     }
   fi
 
-  sudo iptables -w 5 -F "$chain_name" || {
+  run_command sudo iptables -w 5 -F "$chain_name" || {
     restore_firewall_rules "$firewall_backup"
     return 1
   }
 
   # Сначала устанавливаем запрет по умолчанию. Это не оставляет порт открытым,
   # даже если добавление одного из разрешающих правил завершится ошибкой.
-  sudo iptables -w 5 -A "$chain_name" -j DROP || {
+  run_command sudo iptables -w 5 -A "$chain_name" -j DROP || {
     restore_firewall_rules "$firewall_backup"
     return 1
   }
 
   for allowed_ip in "${allowed_ips[@]}"; do
-    sudo iptables -w 5 -I "$chain_name" 1 -s "$allowed_ip/32" -j ACCEPT || {
+    run_command sudo iptables -w 5 -I "$chain_name" 1 -s "$allowed_ip/32" -j ACCEPT || {
       restore_firewall_rules "$firewall_backup"
       return 1
     }
@@ -1199,13 +1326,13 @@ restrict_ispmanager_access() {
 
   # Удаляем прежние переходы в управляемую цепочку, чтобы не создавать дубликаты.
   while sudo iptables -w 5 -C INPUT -p tcp --dport 1500 -j "$chain_name" >/dev/null 2>&1; do
-    sudo iptables -w 5 -D INPUT -p tcp --dport 1500 -j "$chain_name" || {
+    run_command sudo iptables -w 5 -D INPUT -p tcp --dport 1500 -j "$chain_name" || {
       restore_firewall_rules "$firewall_backup"
       return 1
     }
   done
 
-  sudo iptables -w 5 -I INPUT 1 -p tcp --dport 1500 -j "$chain_name" || {
+  run_command sudo iptables -w 5 -I INPUT 1 -p tcp --dport 1500 -j "$chain_name" || {
     restore_firewall_rules "$firewall_backup"
     return 1
   }
@@ -1213,26 +1340,26 @@ restrict_ispmanager_access() {
   # Разрешённые адреса вводятся в формате IPv4. Чтобы порт не оставался
   # доступным в обход allowlist, полностью закрываем его по IPv6.
   if ! sudo ip6tables -w 5 -nL "$chain6_name" >/dev/null 2>&1; then
-    sudo ip6tables -w 5 -N "$chain6_name" || {
+    run_command sudo ip6tables -w 5 -N "$chain6_name" || {
       restore_firewall_rules "$firewall_backup"
       return 1
     }
   fi
-  sudo ip6tables -w 5 -F "$chain6_name" || {
+  run_command sudo ip6tables -w 5 -F "$chain6_name" || {
     restore_firewall_rules "$firewall_backup"
     return 1
   }
-  sudo ip6tables -w 5 -A "$chain6_name" -j DROP || {
+  run_command sudo ip6tables -w 5 -A "$chain6_name" -j DROP || {
     restore_firewall_rules "$firewall_backup"
     return 1
   }
   while sudo ip6tables -w 5 -C INPUT -p tcp --dport 1500 -j "$chain6_name" >/dev/null 2>&1; do
-    sudo ip6tables -w 5 -D INPUT -p tcp --dport 1500 -j "$chain6_name" || {
+    run_command sudo ip6tables -w 5 -D INPUT -p tcp --dport 1500 -j "$chain6_name" || {
       restore_firewall_rules "$firewall_backup"
       return 1
     }
   done
-  sudo ip6tables -w 5 -I INPUT 1 -p tcp --dport 1500 -j "$chain6_name" || {
+  run_command sudo ip6tables -w 5 -I INPUT 1 -p tcp --dport 1500 -j "$chain6_name" || {
     restore_firewall_rules "$firewall_backup"
     return 1
   }
@@ -1311,6 +1438,9 @@ add_ispmanager_allowed_ip() {
     return 0
   fi
 
+  show_command_plan_header
+  show_command sudo iptables -w 5 -I "$chain_name" 1 -s "$allowed_ip/32" -j ACCEPT
+  show_command sudo netfilter-persistent save
   read -rp "Разрешить доступ к ISPmanager с $allowed_ip? [y/N]: " confirmation
   if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
     echo "Операция отменена."
@@ -1324,7 +1454,7 @@ add_ispmanager_allowed_ip() {
   echo "Резервная копия фаервола: $firewall_backup"
 
   # Разрешающее правило вставляется перед завершающим DROP.
-  sudo iptables -w 5 -I "$chain_name" 1 -s "$allowed_ip/32" -j ACCEPT || {
+  run_command sudo iptables -w 5 -I "$chain_name" 1 -s "$allowed_ip/32" -j ACCEPT || {
     restore_firewall_rules "$firewall_backup"
     return 1
   }
@@ -1382,6 +1512,14 @@ remove_ispmanager_allowed_ip() {
     return 1
   fi
 
+  show_command_plan_header
+  if ((managed_rule_exists == 1)); then
+    show_command sudo iptables -w 5 -D "$chain_name" -s "$allowed_ip/32" -j ACCEPT
+  fi
+  if ((legacy_rule_exists == 1)); then
+    show_command sudo iptables -w 5 -D INPUT -s "$allowed_ip/32" -p tcp --dport 1500 -j ACCEPT
+  fi
+  show_command sudo netfilter-persistent save
   read -rp "Удалить доступ к ISPmanager для $allowed_ip? [y/N]: " confirmation
   if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
     echo "Операция отменена."
@@ -1395,14 +1533,14 @@ remove_ispmanager_allowed_ip() {
   echo "Резервная копия фаервола: $firewall_backup"
 
   while sudo iptables -w 5 -C "$chain_name" -s "$allowed_ip/32" -j ACCEPT >/dev/null 2>&1; do
-    sudo iptables -w 5 -D "$chain_name" -s "$allowed_ip/32" -j ACCEPT || {
+    run_command sudo iptables -w 5 -D "$chain_name" -s "$allowed_ip/32" -j ACCEPT || {
       restore_firewall_rules "$firewall_backup"
       return 1
     }
   done
 
   while sudo iptables -w 5 -C INPUT -s "$allowed_ip/32" -p tcp --dport 1500 -j ACCEPT >/dev/null 2>&1; do
-    sudo iptables -w 5 -D INPUT -s "$allowed_ip/32" -p tcp --dport 1500 -j ACCEPT || {
+    run_command sudo iptables -w 5 -D INPUT -s "$allowed_ip/32" -p tcp --dport 1500 -j ACCEPT || {
       restore_firewall_rules "$firewall_backup"
       return 1
     }
