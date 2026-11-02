@@ -742,6 +742,8 @@ disable_unneeded_service() {
 
 ######### nginx  ########
 
+NGINX_BAD_ROBOT_CONFIG="/etc/nginx/vhosts-includes/bad_robot.conf"
+
 nginx_status() {
   echo -e "${GREEN}Выполняю: sudo systemctl status nginx --no-pager ${RESET}"
   sudo systemctl status nginx --no-pager
@@ -767,6 +769,124 @@ nginx_reload() {
   run_command sudo systemctl reload nginx || return 1
   sudo systemctl is-active --quiet nginx || return 1
   echo -e "${GREEN}Nginx перечитал проверенную конфигурацию и остаётся активным.${RESET}"
+}
+
+show_bad_robot_config() {
+  echo -e "${CYAN}=== Конфигурация блокировки ботов Nginx ===${RESET}"
+
+  if sudo test -f "$NGINX_BAD_ROBOT_CONFIG"; then
+    show_command sudo sed -n 1,200p "$NGINX_BAD_ROBOT_CONFIG"
+    sudo sed -n '1,200p' "$NGINX_BAD_ROBOT_CONFIG"
+  else
+    echo "Файл $NGINX_BAD_ROBOT_CONFIG отсутствует."
+  fi
+}
+
+install_bad_robot_config() {
+  local backup_file=""
+  local temp_file
+  local confirmation
+
+  temp_file=$(mktemp) || return 1
+  cat > "$temp_file" <<'EOF'
+# Блокировка нежелательных роботов по заголовку User-Agent.
+# User-Agent легко подделать, поэтому правило является дополнительным фильтром,
+# а не самостоятельной защитой от атак.
+if ($http_user_agent ~* "(AhrefsBot|MJ12bot|masscan|WPScan|DotBot|Semrush|Screaming|Exabot|BLEXBot|MegaIndex|crawler4j|ZmEu|sqlmap|ltx71|nutch|python|pycurl|urllib|BlackWidow|HTTrack|Offline|ZyBorg)") {
+    return 444;
+}
+EOF
+
+  echo -e "${YELLOW}Шаблоны python, pycurl и urllib могут заблокировать легитимные API-клиенты, мониторинг или внутренние интеграции.${RESET}"
+  echo "Будет записан файл $NGINX_BAD_ROBOT_CONFIG:"
+  sed -n '1,200p' "$temp_file"
+  show_command_plan_header
+  show_command sudo mkdir -p "$(dirname "$NGINX_BAD_ROBOT_CONFIG")"
+  show_command sudo install -m 644 "$temp_file" "$NGINX_BAD_ROBOT_CONFIG"
+  show_command sudo nginx -t
+  show_command sudo systemctl reload nginx
+  read -rp "Установить или обновить блокировку ботов Nginx? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    rm -f "$temp_file"
+    echo "Операция отменена. Конфигурация Nginx не изменена."
+    return 0
+  fi
+
+  backup_file=$(create_backup "$NGINX_BAD_ROBOT_CONFIG") || {
+    rm -f "$temp_file"
+    return 1
+  }
+  run_command sudo mkdir -p "$(dirname "$NGINX_BAD_ROBOT_CONFIG")" || {
+    rm -f "$temp_file"
+    return 1
+  }
+  run_command sudo install -m 644 "$temp_file" "$NGINX_BAD_ROBOT_CONFIG" || {
+    rm -f "$temp_file"
+    return 1
+  }
+  rm -f "$temp_file"
+
+  if ! sudo nginx -t; then
+    echo -e "${RED}Конфигурация Nginx не прошла проверку. Выполняем откат.${RESET}"
+    restore_backup "$backup_file" "$NGINX_BAD_ROBOT_CONFIG"
+    sudo nginx -t || echo -e "${RED}После отката конфигурация Nginx всё ещё содержит ошибку.${RESET}"
+    return 1
+  fi
+
+  if ! sudo nginx -T 2>&1 | grep -Fq "configuration file $NGINX_BAD_ROBOT_CONFIG:"; then
+    echo -e "${RED}Nginx не подключил файл $NGINX_BAD_ROBOT_CONFIG. Выполняем откат.${RESET}"
+    echo "На этом сервере каталог vhosts-includes не используется в активной конфигурации Nginx."
+    restore_backup "$backup_file" "$NGINX_BAD_ROBOT_CONFIG"
+    return 1
+  fi
+
+  if ! run_command sudo systemctl reload nginx || ! sudo systemctl is-active --quiet nginx; then
+    echo -e "${RED}Nginx не перечитал новую конфигурацию. Выполняем откат.${RESET}"
+    restore_backup "$backup_file" "$NGINX_BAD_ROBOT_CONFIG"
+    sudo nginx -t && run_command sudo systemctl reload nginx
+    return 1
+  fi
+
+  echo -e "${GREEN}Блокировка указанных User-Agent установлена.${RESET}"
+}
+
+remove_bad_robot_config() {
+  local backup_file
+  local confirmation
+
+  if ! sudo test -f "$NGINX_BAD_ROBOT_CONFIG"; then
+    echo "Файл $NGINX_BAD_ROBOT_CONFIG уже отсутствует."
+    return 0
+  fi
+
+  show_bad_robot_config
+  show_command_plan_header
+  show_command sudo rm -f "$NGINX_BAD_ROBOT_CONFIG"
+  show_command sudo nginx -t
+  show_command sudo systemctl reload nginx
+  read -rp "Удалить блокировку ботов Nginx? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    echo "Операция отменена. Конфигурация Nginx не изменена."
+    return 0
+  fi
+
+  backup_file=$(create_backup "$NGINX_BAD_ROBOT_CONFIG") || return 1
+  run_command sudo rm -f "$NGINX_BAD_ROBOT_CONFIG" || return 1
+
+  if ! sudo nginx -t; then
+    echo -e "${RED}Конфигурация Nginx не прошла проверку после удаления. Выполняем откат.${RESET}"
+    restore_backup "$backup_file" "$NGINX_BAD_ROBOT_CONFIG"
+    return 1
+  fi
+
+  if ! run_command sudo systemctl reload nginx || ! sudo systemctl is-active --quiet nginx; then
+    echo -e "${RED}Nginx не перечитал конфигурацию. Выполняем откат.${RESET}"
+    restore_backup "$backup_file" "$NGINX_BAD_ROBOT_CONFIG"
+    sudo nginx -t && run_command sudo systemctl reload nginx
+    return 1
+  fi
+
+  echo -e "${GREEN}Блокировка ботов Nginx удалена.${RESET}"
 }
 
 ######### Сеть ########
@@ -925,6 +1045,9 @@ nginx_menu() {
     echo -e "${CYAN}=== Nginx ===${RESET}"
     echo "1. Показать статус Nginx"
     echo "2. Проверить конфигурацию и перечитать её"
+    echo "3. Показать конфигурацию блокировки ботов"
+    echo "4. Установить или обновить блокировку ботов"
+    echo "5. Удалить блокировку ботов"
     echo "0. Назад в главное меню"
     echo
     read -p "Выберите действие: " CHOICE
@@ -932,6 +1055,9 @@ nginx_menu() {
     case $CHOICE in
     1) nginx_status ;;
     2) nginx_reload ;;
+    3) show_bad_robot_config ;;
+    4) install_bad_robot_config ;;
+    5) remove_bad_robot_config ;;
     0) break ;;
     *) echo "Неверный выбор. Пожалуйста, попробуйте снова." ;;
     esac
