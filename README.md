@@ -23,12 +23,14 @@ chmod +x server_analysis.sh
 
 ```bash
 ./server_analysis.sh
+./server_setup.sh
 ```
 
 Или так:
 
 ```
-bash <(wget -q -O- --no-check-certificate https://raw.githubusercontent.com/suvarivaza/shell/main/server_analysis.sh)
+bash <(wget -q -O- https://raw.githubusercontent.com/suvarivaza/shell/main/server_analysis.sh)
+bash <(wget -q -O- https://raw.githubusercontent.com/suvarivaza/shell/main/server_setup.sh)
 ```
 
 Запуск через удалённый URL менее безопасен: содержимое выполняется сразу и не проходит предварительную проверку.

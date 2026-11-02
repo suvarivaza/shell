@@ -37,6 +37,21 @@ restore_backup() {
   fi
 }
 
+systemd_unit_exists() {
+  local unit_name="$1"
+
+  if systemctl list-unit-files --no-legend 2>/dev/null | awk '{print $1}' | grep -Fxq "$unit_name"; then
+    return 0
+  fi
+
+  if [[ "$unit_name" != *.* ]] &&
+     systemctl list-unit-files --no-legend 2>/dev/null | awk '{print $1}' | grep -Fxq "$unit_name.service"; then
+    return 0
+  fi
+
+  return 1
+}
+
 ######### SSH ########
 
 
@@ -112,8 +127,7 @@ check_ssh_connection_by_password() {
 reload_ssh() {
   local service_name="ssh"
 
-  if systemctl list-unit-files sshd.service >/dev/null 2>&1 &&
-     ! systemctl list-unit-files ssh.service >/dev/null 2>&1; then
+  if systemd_unit_exists sshd.service && ! systemd_unit_exists ssh.service; then
     service_name="sshd"
   fi
 
@@ -125,6 +139,85 @@ reload_ssh() {
 find_ssh_configs(){
   sudo grep -RnsE '^(Include|PubkeyAuthentication|PasswordAuthentication|KbdInteractiveAuthentication|ChallengeResponseAuthentication|PermitRootLogin|MaxAuthTries)' \
     /etc/ssh/sshd_config /etc/ssh/sshd_config.d 2>/dev/null
+}
+
+has_sudo_admin_key() {
+  local sudo_members
+  local admin_user
+  local admin_home
+  local -a admin_users=()
+
+  sudo_members=$(getent group sudo | cut -d: -f4)
+  IFS=',' read -r -a admin_users <<< "$sudo_members"
+
+  for admin_user in "${admin_users[@]}"; do
+    [[ -n "$admin_user" ]] || continue
+    admin_home=$(getent passwd "$admin_user" | cut -d: -f6)
+    if [[ -n "$admin_home" ]] && sudo test -s "$admin_home/.ssh/authorized_keys"; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+configure_root_ssh_access() {
+  local config_file="/etc/ssh/sshd_config.d/98-root-access.conf"
+  local backup_file=""
+  local root_mode
+  local confirmation
+  local temp_file
+
+  echo "1. Разрешить root только по SSH-ключу"
+  echo "2. Полностью запретить вход root по SSH"
+  echo "0. Отмена"
+  read -rp "Выберите режим: " root_mode
+
+  case "$root_mode" in
+    1) root_mode="prohibit-password" ;;
+    2) root_mode="no" ;;
+    0) return 0 ;;
+    *) echo -e "${RED}Неверный выбор.${RESET}"; return 1 ;;
+  esac
+
+  if [[ "$root_mode" == "no" ]]; then
+    if ! has_sudo_admin_key; then
+      echo -e "${RED}Не найден альтернативный администратор из группы sudo с установленным SSH-ключом.${RESET}"
+      echo "Сначала создайте администратора, установите ключ и проверьте вход."
+      return 1
+    fi
+    echo -e "${YELLOW}Вход root по SSH будет полностью запрещён.${RESET}"
+  fi
+
+  read -rp "Применить PermitRootLogin $root_mode? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    echo "Операция отменена."
+    return 0
+  fi
+
+  backup_file=$(create_backup "$config_file") || return 1
+  temp_file=$(mktemp) || return 1
+  printf 'PermitRootLogin %s\n' "$root_mode" > "$temp_file"
+  sudo install -m 600 "$temp_file" "$config_file" || {
+    rm -f "$temp_file"
+    return 1
+  }
+  rm -f "$temp_file"
+
+  if ! sudo sshd -t; then
+    echo -e "${RED}Конфигурация SSH не прошла проверку. Выполняем откат.${RESET}"
+    restore_backup "$backup_file" "$config_file"
+    return 1
+  fi
+
+  reload_ssh || {
+    restore_backup "$backup_file" "$config_file"
+    sudo sshd -t && reload_ssh
+    return 1
+  }
+
+  check_ssh_settings
+  echo "Проверьте вход в новой сессии до закрытия текущего подключения."
 }
 
 ######### Пользователи ########
@@ -148,9 +241,62 @@ create_new_user() {
   sudo adduser "$username"
 }
 
+install_user_ssh_key() {
+  local username
+  local user_home
+  local public_key
+
+  read -rp "Введите имя пользователя: " username
+  if ! getent passwd "$username" >/dev/null; then
+    echo -e "${RED}Пользователь $username не найден.${RESET}"
+    return 1
+  fi
+
+  read -rp "Вставьте публичный SSH-ключ одной строкой: " public_key
+  if [[ ! "$public_key" =~ ^(ssh-(rsa|ed25519)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)[[:space:]]+[A-Za-z0-9+/=]+([[:space:]].*)?$ ]]; then
+    echo -e "${RED}Строка не похожа на поддерживаемый публичный SSH-ключ.${RESET}"
+    return 1
+  fi
+
+  user_home=$(getent passwd "$username" | cut -d: -f6)
+  sudo install -d -m 700 -o "$username" -g "$username" "$user_home/.ssh" || return 1
+  if ! sudo grep -qxF "$public_key" "$user_home/.ssh/authorized_keys" 2>/dev/null; then
+    printf '%s\n' "$public_key" | sudo tee -a "$user_home/.ssh/authorized_keys" >/dev/null || return 1
+  fi
+  sudo chown "$username:$username" "$user_home/.ssh/authorized_keys" || return 1
+  sudo chmod 600 "$user_home/.ssh/authorized_keys" || return 1
+  echo -e "${GREEN}Ключ установлен пользователю $username.${RESET}"
+}
+
+create_admin_user() {
+  local username
+  local confirmation
+
+  read -rp "Введите имя нового администратора: " username
+  if [[ ! "$username" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+    echo -e "${RED}Недопустимое имя пользователя.${RESET}"
+    return 1
+  fi
+
+  if ! getent passwd "$username" >/dev/null; then
+    sudo adduser "$username" || return 1
+  fi
+
+  read -rp "Добавить пользователя $username в группу sudo? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    echo "Пользователь создан без административных прав."
+    return 0
+  fi
+
+  sudo usermod -aG sudo "$username" || return 1
+  echo -e "${GREEN}Пользователь $username добавлен в группу sudo.${RESET}"
+  echo "Теперь установите ему SSH-ключ и проверьте вход в отдельной сессии."
+}
+
 ######### Fail2Ban ########
 
 NGINX_ACCESS_LOG="/var/log/nginx/access.log"
+EXIM_LOG="/var/log/exim4/mainlog"
 FAIL2BAN_CONFIG="/etc/fail2ban/jail.d/99-server-setup.conf"
 
 install_fail2ban() {
@@ -208,6 +354,15 @@ logpath = $NGINX_ACCESS_LOG
 EOF
   fi
 
+  if [[ -f /etc/fail2ban/filter.d/exim.conf && -f "$EXIM_LOG" ]]; then
+    cat >> "$temp_file" <<EOF
+
+[exim]
+enabled = true
+logpath = $EXIM_LOG
+EOF
+  fi
+
   sudo install -m 640 "$temp_file" "$FAIL2BAN_CONFIG" || {
     rm -f "$temp_file"
     return 1
@@ -257,6 +412,85 @@ fail2ban_log() {
   sudo tail -f /var/log/fail2ban.log
 }
 
+######### Автоматические обновления безопасности ########
+
+UNATTENDED_CONFIG="/etc/apt/apt.conf.d/20auto-upgrades"
+UNATTENDED_ORIGINS_CONFIG="/etc/apt/apt.conf.d/52-server-setup-security-updates"
+
+setup_security_updates() {
+  local backup_file=""
+  local origins_backup_file=""
+  local temp_file
+  local origins_temp_file
+
+  echo "Устанавливаем unattended-upgrades..."
+  sudo apt-get update || return 1
+  sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades || return 1
+
+  backup_file=$(create_backup "$UNATTENDED_CONFIG") || return 1
+  origins_backup_file=$(create_backup "$UNATTENDED_ORIGINS_CONFIG") || return 1
+  temp_file=$(mktemp) || return 1
+  origins_temp_file=$(mktemp) || {
+    rm -f "$temp_file"
+    return 1
+  }
+  cat > "$temp_file" <<'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+  sudo install -m 644 "$temp_file" "$UNATTENDED_CONFIG" || {
+    rm -f "$temp_file" "$origins_temp_file"
+    return 1
+  }
+  rm -f "$temp_file"
+
+  cat > "$origins_temp_file" <<'EOF'
+#clear Unattended-Upgrade::Allowed-Origins;
+#clear Unattended-Upgrade::Origins-Pattern;
+Unattended-Upgrade::Origins-Pattern {
+    "codename=${distro_codename}-security";
+};
+Unattended-Upgrade::Automatic-Reboot "false";
+EOF
+  sudo install -m 644 "$origins_temp_file" "$UNATTENDED_ORIGINS_CONFIG" || {
+    rm -f "$origins_temp_file"
+    restore_backup "$backup_file" "$UNATTENDED_CONFIG"
+    return 1
+  }
+  rm -f "$origins_temp_file"
+
+  if ! sudo unattended-upgrade --dry-run; then
+    echo -e "${RED}Проверочный запуск unattended-upgrades завершился с ошибкой. Выполняем откат.${RESET}"
+    restore_backup "$backup_file" "$UNATTENDED_CONFIG"
+    restore_backup "$origins_backup_file" "$UNATTENDED_ORIGINS_CONFIG"
+    return 1
+  fi
+
+  if ! sudo systemctl enable --now apt-daily.timer apt-daily-upgrade.timer; then
+    echo -e "${RED}Не удалось включить таймеры APT. Выполняем откат конфигурации.${RESET}"
+    restore_backup "$backup_file" "$UNATTENDED_CONFIG"
+    restore_backup "$origins_backup_file" "$UNATTENDED_ORIGINS_CONFIG"
+    return 1
+  fi
+  echo -e "${GREEN}Автоматическая установка обновлений безопасности включена.${RESET}"
+  echo "Автоматически устанавливаются только пакеты из репозитория с кодовым именем *-security."
+}
+
+check_security_updates() {
+  echo -e "${CYAN}=== Автоматические обновления безопасности ===${RESET}"
+  dpkg-query -W -f='${Status} ${Version}\n' unattended-upgrades 2>/dev/null || echo "Пакет не установлен."
+  systemctl status apt-daily.timer apt-daily-upgrade.timer --no-pager || true
+  systemctl list-timers 'apt-daily*' --all --no-pager || true
+  echo
+  echo "Эффективная конфигурация периодических обновлений:"
+  apt-config dump | grep -E 'APT::Periodic|Unattended-Upgrade::(Allowed-Origins|Origins-Pattern)' || true
+}
+
+security_updates_log() {
+  echo "Для выхода из просмотра нажмите Ctrl+C."
+  sudo tail -n 100 -f /var/log/unattended-upgrades/unattended-upgrades.log
+}
+
 
 
 ######### Система ########
@@ -277,6 +511,76 @@ system_log() {
   echo "Для выхода из просмотра нажмите Ctrl+C."
   echo -e "${GREEN}Выполняю: sudo tail -n 100 -f /var/log/syslog ${RESET}"
   sudo tail -n 100 -f /var/log/syslog
+}
+
+security_service_inventory() {
+  local service_name
+  local -a services=(
+    ssh sshd nginx apache2
+    proftpd vsftpd pure-ftpd telnet telnet.socket
+    mysql mariadb postgresql redis-server
+    exim4 postfix dovecot
+    fail2ban netfilter-persistent
+  )
+
+  echo -e "${CYAN}=== Инвентаризация потенциально значимых служб ===${RESET}"
+  for service_name in "${services[@]}"; do
+    if systemd_unit_exists "$service_name"; then
+      printf '%-24s active=%-10s enabled=%s\n' \
+        "$service_name" \
+        "$(systemctl is-active "$service_name" 2>/dev/null || true)" \
+        "$(systemctl is-enabled "$service_name" 2>/dev/null || true)"
+    fi
+  done
+
+  echo
+  echo "Слушающие процессы:"
+  sudo ss -lntup
+}
+
+disable_unneeded_service() {
+  local service_name
+  local confirmation
+  local candidate
+  local -a allowed_services=(
+    proftpd vsftpd pure-ftpd telnet telnet.socket
+    mysql mariadb postgresql redis-server
+    exim4 postfix dovecot
+  )
+  local allowed=0
+
+  security_service_inventory
+  echo
+  read -rp "Введите точное имя службы, которую нужно остановить и отключить: " service_name
+
+  for candidate in "${allowed_services[@]}"; do
+    if [[ "$service_name" == "$candidate" ]]; then
+      allowed=1
+      break
+    fi
+  done
+
+  if ((allowed == 0)); then
+    echo -e "${RED}Эта служба не входит в ограниченный список отключаемых сервисов.${RESET}"
+    echo "Для нестандартной службы сначала проверьте её назначение вручную."
+    return 1
+  fi
+
+  if ! systemd_unit_exists "$service_name"; then
+    echo "Служба $service_name не установлена."
+    return 0
+  fi
+
+  echo -e "${YELLOW}Остановка базы данных или почтовой службы может нарушить работу сайтов и почты.${RESET}"
+  read -rp "Введите точное имя '$service_name' ещё раз для подтверждения: " confirmation
+  if [[ "$confirmation" != "$service_name" ]]; then
+    echo "Операция отменена."
+    return 0
+  fi
+
+  sudo systemctl disable --now "$service_name" || return 1
+  echo -e "${GREEN}Служба $service_name остановлена и отключена из автозагрузки.${RESET}"
+  echo "Для возврата: sudo systemctl enable --now $service_name"
 }
 
 ######### nginx  ########
@@ -305,7 +609,48 @@ open_ports() {
   sudo ss -lntup
 }
 
-security_audit() {
+filesystem_security_audit() {
+  local web_root="/var/www"
+
+  echo -e "${CYAN}=== Проверка безопасности файловой системы ===${RESET}"
+
+  if [[ ! -d "$web_root" ]]; then
+    echo "Каталог $web_root отсутствует."
+    return 0
+  fi
+
+  echo
+  echo -e "${BLUE}Файлы и каталоги с правами записи для всех в $web_root:${RESET}"
+  sudo find "$web_root" -xdev -perm -0002 -printf '%m %u:%g %p\n' 2>/dev/null || true
+
+  echo
+  echo -e "${BLUE}Потенциально чувствительные конфигурационные файлы:${RESET}"
+  sudo find "$web_root" -xdev -type f \
+    \( -name '.env' -o -name 'configuration.php' -o -name 'wp-config.php' -o -name '*.key' -o -name '*.pem' \) \
+    -printf '%m %u:%g %p\n' 2>/dev/null || true
+
+  echo
+  echo -e "${BLUE}Чувствительные конфигурационные файлы, доступные для чтения всем:${RESET}"
+  sudo find "$web_root" -xdev -type f -perm -0004 \
+    \( -name '.env' -o -name 'configuration.php' -o -name 'wp-config.php' -o -name '*.key' -o -name '*.pem' \) \
+    -printf '%m %u:%g %p\n' 2>/dev/null || true
+
+  echo
+  echo -e "${BLUE}Приватные SSH-файлы с доступом для группы или остальных:${RESET}"
+  sudo find /root /home -xdev -type f -path '*/.ssh/*' ! -name '*.pub' \
+    -perm /077 -printf '%m %u:%g %p\n' 2>/dev/null || true
+
+  echo
+  echo -e "${BLUE}Каталоги веб-сайтов, принадлежащие www-data и доступные ему для записи:${RESET}"
+  sudo find "$web_root" -xdev -type d -user www-data -perm -u+w \
+    -printf '%m %u:%g %p\n' 2>/dev/null || true
+
+  echo
+  echo "Пустой раздел означает, что соответствующие проблемы не найдены."
+  echo "Найденные writable-каталоги нужно оценивать вручную: cache, logs и uploads могут быть легитимными."
+}
+
+collect_security_report() {
   local service_name
 
   echo -e "${CYAN}=== Аудит безопасности без изменения системы ===${RESET}"
@@ -322,13 +667,17 @@ security_audit() {
   echo
   echo -e "${BLUE}Службы безопасности и сетевые службы:${RESET}"
   for service_name in ssh sshd nginx fail2ban netfilter-persistent proftpd; do
-    if systemctl list-unit-files "$service_name.service" >/dev/null 2>&1; then
+    if systemd_unit_exists "$service_name"; then
       printf '%-24s active=%-10s enabled=%s\n' \
         "$service_name" \
         "$(systemctl is-active "$service_name" 2>/dev/null || true)" \
         "$(systemctl is-enabled "$service_name" 2>/dev/null || true)"
     fi
   done
+
+  echo
+  echo -e "${BLUE}Все активные службы:${RESET}"
+  systemctl list-units --type=service --state=running --no-pager
 
   echo
   echo -e "${BLUE}Открытые TCP/UDP-порты:${RESET}"
@@ -347,6 +696,13 @@ security_audit() {
   getent group sudo || true
 
   echo
+  echo -e "${BLUE}Установленные SSH-ключи пользователей:${RESET}"
+  while IFS= read -r authorized_keys_file; do
+    echo "$authorized_keys_file"
+    sudo ssh-keygen -lf "$authorized_keys_file" 2>/dev/null || echo "  Не удалось прочитать ключи."
+  done < <(sudo find /root /home -xdev -type f -path '*/.ssh/authorized_keys' 2>/dev/null)
+
+  echo
   echo -e "${BLUE}Fail2Ban:${RESET}"
   if command -v fail2ban-client >/dev/null 2>&1; then
     sudo fail2ban-client status || true
@@ -357,6 +713,18 @@ security_audit() {
   echo
   echo -e "${BLUE}Фаервол INPUT:${RESET}"
   sudo iptables -w 5 -L INPUT -n -v --line-numbers
+  sudo ip6tables -w 5 -L INPUT -n -v --line-numbers
+
+  echo
+  echo -e "${BLUE}Сохранение правил фаервола:${RESET}"
+  systemctl is-enabled netfilter-persistent 2>/dev/null || true
+  systemctl is-active netfilter-persistent 2>/dev/null || true
+
+  echo
+  echo -e "${BLUE}Автоматические обновления:${RESET}"
+  systemctl is-enabled apt-daily-upgrade.timer 2>/dev/null || true
+  systemctl is-active apt-daily-upgrade.timer 2>/dev/null || true
+  apt-config dump | grep -E 'APT::Periodic|Unattended-Upgrade::(Allowed-Origins|Origins-Pattern)' || true
 
   echo
   echo -e "${BLUE}Доступные обновления пакетов:${RESET}"
@@ -364,6 +732,23 @@ security_audit() {
 
   echo
   echo -e "${GREEN}Аудит завершён. Скрипт ничего не изменял.${RESET}"
+}
+
+security_audit() {
+  collect_security_report
+}
+
+save_security_report() {
+  local report_file
+
+  report_file="${PWD}/server-security-report-$(date +%Y%m%d-%H%M%S).txt"
+  {
+    collect_security_report
+    echo
+    filesystem_security_audit
+  } 2>&1 | tee "$report_file"
+  echo
+  echo -e "${GREEN}Отчёт сохранён: $report_file${RESET}"
 }
 
 # Подменю nginx
@@ -414,12 +799,16 @@ user_settings_menu() {
     echo
     echo -e "${CYAN}=== Пользователи ===${RESET}"
     echo "1. Создать нового пользователя"
+    echo "2. Создать администратора с правами sudo"
+    echo "3. Установить публичный SSH-ключ пользователю"
     echo "0. Назад в главное меню"
     echo
     read -p "Выберите действие: " CHOICE
 
     case $CHOICE in
     1) create_new_user ;;
+    2) create_admin_user ;;
+    3) install_user_ssh_key ;;
     0) break ;;
     *) echo "Неверный выбор. Пожалуйста, попробуйте снова." ;;
     esac
@@ -479,6 +868,7 @@ ssh_settings_menu() {
     echo "2. Заблокировать доступ к SSH по паролю"
     echo "3. Проверить, отключён ли пароль в эффективной конфигурации"
     echo "4. Найти настройки во всех SSH-конфигах"
+    echo "5. Настроить доступ root по SSH"
     echo "0. Назад в главное меню"
     echo
     read -p "Выберите действие: " CHOICE
@@ -488,8 +878,47 @@ ssh_settings_menu() {
     2) block_ssh_access_by_password ;;
     3) check_ssh_connection_by_password ;;
     4) find_ssh_configs ;;
+    5) configure_root_ssh_access ;;
     0) break ;;
     *) echo "Неверный выбор. Пожалуйста, попробуйте снова." ;;
+    esac
+  done
+}
+
+security_updates_menu() {
+  while true; do
+    echo
+    echo -e "${CYAN}=== Автоматические обновления безопасности ===${RESET}"
+    echo "1. Установить и включить security-обновления"
+    echo "2. Проверить состояние и таймеры"
+    echo "3. Смотреть журнал unattended-upgrades"
+    echo "0. Назад в главное меню"
+    read -rp "Выберите действие: " CHOICE
+
+    case $CHOICE in
+      1) setup_security_updates ;;
+      2) check_security_updates ;;
+      3) security_updates_log ;;
+      0) break ;;
+      *) echo "Неверный выбор." ;;
+    esac
+  done
+}
+
+services_security_menu() {
+  while true; do
+    echo
+    echo -e "${CYAN}=== Инвентаризация служб ===${RESET}"
+    echo "1. Показать значимые службы и открытые порты"
+    echo "2. Остановить и отключить выбранную ненужную службу"
+    echo "0. Назад в главное меню"
+    read -rp "Выберите действие: " CHOICE
+
+    case $CHOICE in
+      1) security_service_inventory ;;
+      2) disable_unneeded_service ;;
+      0) break ;;
+      *) echo "Неверный выбор." ;;
     esac
   done
 }
@@ -954,6 +1383,10 @@ while true; do
   echo "6. Сеть"
   echo "7. Фаервол iptables"
   echo "8. Аудит безопасности без изменений"
+  echo "9. Автоматические обновления безопасности"
+  echo "10. Инвентаризация и отключение служб"
+  echo "11. Проверка файловой системы"
+  echo "12. Сохранить итоговый отчёт безопасности"
   echo "0. Выход"
   echo
   read -p "Введите номер раздела: " MAIN_CHOICE
@@ -967,6 +1400,10 @@ while true; do
   6) network_menu ;;
   7) iptables_menu ;;
   8) security_audit ;;
+  9) security_updates_menu ;;
+  10) services_security_menu ;;
+  11) filesystem_security_audit ;;
+  12) save_security_report ;;
   0)
     echo "Выход."
     exit 0
