@@ -9,6 +9,7 @@ CYAN='\033[0;36m'
 RESET='\033[0m'
 
 BACKUP_DIR="/root/server-setup-backups"
+SECURITY_REPORT_DIR="/root/server-security-reports"
 
 show_command() {
   local argument
@@ -1520,15 +1521,34 @@ security_audit() {
 
 save_security_report() {
   local report_file
+  local temporary_report
 
-  report_file="${PWD}/server-security-report-$(date +%Y%m%d-%H%M%S).txt"
+  report_file="$SECURITY_REPORT_DIR/server-security-report-$(date +%Y%m%d-%H%M%S).txt"
+  temporary_report=$(mktemp) || {
+    echo -e "${RED}Не удалось создать временный файл для отчёта.${RESET}"
+    return 1
+  }
+
+  # Сначала формируем отчёт во временном файле пользователя, а затем устанавливаем
+  # его в закрытый каталог root. Так отчёт не попадёт в каталог сайта даже при
+  # запуске скрипта из DocumentRoot.
   {
     collect_security_report
     echo
     filesystem_security_audit
-  } 2>&1 | tee "$report_file"
+  } 2>&1 | tee "$temporary_report"
+
+  if ! run_command sudo install -d -m 700 -o root -g root "$SECURITY_REPORT_DIR" ||
+    ! run_command sudo install -m 600 -o root -g root "$temporary_report" "$report_file"; then
+    rm -f "$temporary_report"
+    echo -e "${RED}Не удалось сохранить отчёт в закрытом системном каталоге.${RESET}"
+    return 1
+  fi
+
+  rm -f "$temporary_report"
   echo
   echo -e "${GREEN}Отчёт сохранён: $report_file${RESET}"
+  echo "Для просмотра используйте: sudo less $report_file"
 }
 
 # Подменю nginx

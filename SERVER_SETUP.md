@@ -419,10 +419,18 @@ Read-only проверка ищет:
 
 ### 12. Итоговый отчёт
 
-Запускает общий read-only аудит и одновременно сохраняет его результат в текущем каталоге:
+Запускает общий read-only аудит и сохраняет его результат в закрытом системном каталоге:
 
 ```text
-server-security-report-YYYYMMDD-HHMMSS.txt
+/root/server-security-reports/server-security-report-YYYYMMDD-HHMMSS.txt
+```
+
+Каталог создаётся с правами `700`, а отчёты — с правами `600` и владельцем
+`root:root`. Путь не зависит от текущего каталога запуска, поэтому отчёт не
+попадёт в DocumentRoot сайта. Для просмотра нужен `sudo`, например:
+
+```bash
+sudo less /root/server-security-reports/server-security-report-YYYYMMDD-HHMMSS.txt
 ```
 
 Отчёт удобно сохранить перед настройкой, повторить после неё и сравнить результаты.
