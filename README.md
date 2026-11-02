@@ -1,16 +1,40 @@
+# Shell scripts
 
+Набор вспомогательных скриптов для настройки, диагностики и обслуживания серверов.
 
-1.	Скопировать содержимое в файл, например, server_analysis.sh
-2.	Сделать скрипт исполняемым: chmod +x server_analysis.sh
-3.	Запустить скрипт: ./web_server_analysis.sh
+## Документация
+
+- [`server_setup.sh`](server_setup.sh) — интерактивная первичная настройка и аудит сервера.
+  - [Подробная документация Server Setup](SERVER_SETUP.md)
+
+Для остальных скриптов отдельные документы будут добавляться по мере их аудита и обновления.
+
+## Общий способ запуска
+
+1. Скопировать скрипт на сервер.
+2. Проверить его содержимое.
+3. Сделать файл исполняемым, например:
+
+```bash
+chmod +x server_analysis.sh
+```
+
+4. Запустить:
+
+```bash
+./server_analysis.sh
+```
 
 Или так:
+
 ```
 bash <(wget -q -O- --no-check-certificate https://raw.githubusercontent.com/suvarivaza/shell/main/server_analysis.sh)
 ```
 
+Запуск через удалённый URL менее безопасен: содержимое выполняется сразу и не проходит предварительную проверку.
 
-Полезное:
-https://github.com/awesome-lists/awesome-bash
+## Полезные материалы
+
+- [Awesome Bash](https://github.com/awesome-lists/awesome-bash)
 
 
