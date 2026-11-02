@@ -581,6 +581,138 @@ restrict_ispmanager_access() {
   echo "Проверьте доступ с разрешённого IP до завершения текущей SSH-сессии."
 }
 
+list_ispmanager_access() {
+  local chain_name="ISPMGR_ACCESS"
+
+  echo -e "${CYAN}=== Доступ к ISPmanager ===${RESET}"
+
+  if sudo iptables -nL "$chain_name" >/dev/null 2>&1; then
+    echo "Управляемая цепочка $chain_name:"
+    sudo iptables -L "$chain_name" -n -v --line-numbers
+  else
+    echo "Управляемая цепочка $chain_name пока не создана."
+  fi
+
+  echo
+  echo "Прямые правила INPUT для TCP-порта 1500:"
+  if ! sudo iptables -S INPUT | grep -E -- '--dport 1500'; then
+    echo "Прямые правила отсутствуют."
+  fi
+}
+
+add_ispmanager_allowed_ip() {
+  local chain_name="ISPMGR_ACCESS"
+  local detected_ip=""
+  local allowed_ip
+  local confirmation
+
+  if ! sudo iptables -nL "$chain_name" >/dev/null 2>&1; then
+    echo -e "${RED}Сначала создайте ограничение через пункт 2 меню iptables.${RESET}"
+    return 1
+  fi
+
+  if [[ -n "${SSH_CLIENT:-}" ]]; then
+    detected_ip="${SSH_CLIENT%% *}"
+  fi
+
+  read -rp "Введите разрешённый IPv4-адрес${detected_ip:+ [по умолчанию: $detected_ip]}: " allowed_ip
+  if [[ -z "$allowed_ip" && -n "$detected_ip" ]]; then
+    allowed_ip="$detected_ip"
+  fi
+
+  if ! is_valid_ipv4 "$allowed_ip"; then
+    echo -e "${RED}Некорректный IPv4-адрес: $allowed_ip.${RESET}"
+    return 1
+  fi
+
+  if sudo iptables -C "$chain_name" -s "$allowed_ip/32" -j ACCEPT >/dev/null 2>&1; then
+    echo "Адрес $allowed_ip уже присутствует в управляемом allowlist."
+    return 0
+  fi
+
+  read -rp "Разрешить доступ к ISPmanager с $allowed_ip? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    echo "Операция отменена."
+    return 0
+  fi
+
+  # Разрешающее правило вставляется перед завершающим DROP.
+  sudo iptables -I "$chain_name" 1 -s "$allowed_ip/32" -j ACCEPT || return 1
+
+  if ! setup_iptables_persistence; then
+    echo -e "${RED}Адрес добавлен, но сохранить правила не удалось.${RESET}"
+    return 1
+  fi
+
+  echo -e "${GREEN}Доступ с $allowed_ip разрешён.${RESET}"
+  list_ispmanager_access
+}
+
+remove_ispmanager_allowed_ip() {
+  local chain_name="ISPMGR_ACCESS"
+  local allowed_ip
+  local confirmation
+  local managed_rule_exists=0
+  local legacy_rule_exists=0
+  local managed_rule_count=0
+
+  list_ispmanager_access
+  echo
+  read -rp "Введите IPv4-адрес, доступ которого нужно удалить: " allowed_ip
+
+  if ! is_valid_ipv4 "$allowed_ip"; then
+    echo -e "${RED}Некорректный IPv4-адрес: $allowed_ip.${RESET}"
+    return 1
+  fi
+
+  if sudo iptables -nL "$chain_name" >/dev/null 2>&1; then
+    managed_rule_count=$(sudo iptables -S "$chain_name" |
+      grep -c -- '-j ACCEPT' || true)
+
+    if sudo iptables -C "$chain_name" -s "$allowed_ip/32" -j ACCEPT >/dev/null 2>&1; then
+      managed_rule_exists=1
+    fi
+  fi
+
+  # Поддерживаем удаление старых правил, созданных до появления ISPMGR_ACCESS.
+  if sudo iptables -C INPUT -s "$allowed_ip/32" -p tcp --dport 1500 -j ACCEPT >/dev/null 2>&1; then
+    legacy_rule_exists=1
+  fi
+
+  if ((managed_rule_exists == 0 && legacy_rule_exists == 0)); then
+    echo "Разрешающие правила для $allowed_ip не найдены."
+    return 0
+  fi
+
+  if ((managed_rule_exists == 1 && managed_rule_count <= 1)); then
+    echo -e "${RED}Нельзя удалить последний адрес из управляемого allowlist.${RESET}"
+    echo "Сначала добавьте новый разрешённый IP."
+    return 1
+  fi
+
+  read -rp "Удалить доступ к ISPmanager для $allowed_ip? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    echo "Операция отменена."
+    return 0
+  fi
+
+  while sudo iptables -C "$chain_name" -s "$allowed_ip/32" -j ACCEPT >/dev/null 2>&1; do
+    sudo iptables -D "$chain_name" -s "$allowed_ip/32" -j ACCEPT || return 1
+  done
+
+  while sudo iptables -C INPUT -s "$allowed_ip/32" -p tcp --dport 1500 -j ACCEPT >/dev/null 2>&1; do
+    sudo iptables -D INPUT -s "$allowed_ip/32" -p tcp --dport 1500 -j ACCEPT || return 1
+  done
+
+  if ! setup_iptables_persistence; then
+    echo -e "${RED}Адрес удалён из активных правил, но сохранить изменения не удалось.${RESET}"
+    return 1
+  fi
+
+  echo -e "${GREEN}Доступ для $allowed_ip удалён.${RESET}"
+  list_ispmanager_access
+}
+
 # Подменю iptables
 iptables_menu() {
   while true; do
@@ -588,6 +720,9 @@ iptables_menu() {
     echo -e "${CYAN}=== Фаервол iptables ===${RESET}"
     echo "1. Список правил iptables"
     echo "2. Ограничить доступ к ISPmanager по IP"
+    echo "3. Показать доступ к ISPmanager"
+    echo "4. Добавить разрешённый IP для ISPmanager"
+    echo "5. Удалить разрешённый IP для ISPmanager"
     echo "0. Назад в главное меню"
     echo
     read -p "Выберите действие: " CHOICE
@@ -595,6 +730,9 @@ iptables_menu() {
     case $CHOICE in
     1) rules_iptables ;;
     2) restrict_ispmanager_access ;;
+    3) list_ispmanager_access ;;
+    4) add_ispmanager_allowed_ip ;;
+    5) remove_ispmanager_allowed_ip ;;
     0) break ;;
     *) echo "Неверный выбор. Пожалуйста, попробуйте снова." ;;
     esac
