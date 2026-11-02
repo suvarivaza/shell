@@ -66,6 +66,8 @@ block_ssh_access_by_password() {
   local login_user="${SUDO_USER:-${USER:-root}}"
   local login_home
   local temp_file
+  local confirmation
+  local key_access_confirmation
 
   echo -e "${CYAN}==== Блокируем доступ к SSH по паролю ====${RESET}"
 
@@ -75,6 +77,21 @@ block_ssh_access_by_password() {
     echo -e "${RED}Не найден ни один непустой authorized_keys.${RESET}"
     echo "Сначала настройте и проверьте вход по SSH-ключу, затем повторите операцию."
     return 1
+  fi
+
+  echo -e "${YELLOW}Внимание: после отключения входа по паролю подключиться к серверу можно будет только по SSH-ключу.${RESET}"
+  echo "Перед продолжением откройте второй терминал и убедитесь, что новое SSH-подключение по ключу работает."
+  echo "Не закрывайте текущую SSH-сессию до завершения проверки."
+  read -rp "Вы точно хотите отключить вход по SSH-паролю? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[Yy]$ ]]; then
+    echo "Операция отменена. Настройки SSH не изменены."
+    return 0
+  fi
+
+  read -rp "Если вход по SSH-ключу уже проверен в отдельной сессии, введите ПРОВЕРЕН: " key_access_confirmation
+  if [[ "$key_access_confirmation" != "ПРОВЕРЕН" ]]; then
+    echo -e "${YELLOW}Подтверждение не получено. Настройки SSH не изменены.${RESET}"
+    return 0
   fi
 
   backup_file=$(create_backup "$config_file") || return 1
@@ -166,6 +183,7 @@ configure_root_ssh_access() {
   local backup_file=""
   local root_mode
   local confirmation
+  local admin_access_confirmation
   local temp_file
 
   echo "1. Разрешить root только по SSH-ключу"
@@ -187,6 +205,12 @@ configure_root_ssh_access() {
       return 1
     fi
     echo -e "${YELLOW}Вход root по SSH будет полностью запрещён.${RESET}"
+    echo "Перед продолжением проверьте вход альтернативным администратором с sudo в отдельной SSH-сессии."
+    read -rp "Если такой вход уже проверен, введите ПРОВЕРЕН: " admin_access_confirmation
+    if [[ "$admin_access_confirmation" != "ПРОВЕРЕН" ]]; then
+      echo -e "${YELLOW}Подтверждение не получено. Настройки SSH не изменены.${RESET}"
+      return 0
+    fi
   fi
 
   read -rp "Применить PermitRootLogin $root_mode? [y/N]: " confirmation
@@ -224,6 +248,7 @@ configure_root_ssh_access() {
 
 create_new_user() {
   local username
+  local confirmation
 
   echo "Создание нового пользователя..."
   read -rp "Введите имя пользователя: " username
@@ -238,6 +263,12 @@ create_new_user() {
     return 0
   fi
 
+  read -rp "Создать системного пользователя $username? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    echo "Операция отменена. Пользователь не создан."
+    return 0
+  fi
+
   sudo adduser "$username"
 }
 
@@ -245,6 +276,7 @@ install_user_ssh_key() {
   local username
   local user_home
   local public_key
+  local confirmation
 
   read -rp "Введите имя пользователя: " username
   if ! getent passwd "$username" >/dev/null; then
@@ -256,6 +288,12 @@ install_user_ssh_key() {
   if [[ ! "$public_key" =~ ^(ssh-(rsa|ed25519)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)[[:space:]]+[A-Za-z0-9+/=]+([[:space:]].*)?$ ]]; then
     echo -e "${RED}Строка не похожа на поддерживаемый публичный SSH-ключ.${RESET}"
     return 1
+  fi
+
+  read -rp "Добавить указанный SSH-ключ пользователю $username? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    echo "Операция отменена. SSH-ключ не изменён."
+    return 0
   fi
 
   user_home=$(getent passwd "$username" | cut -d: -f6)
@@ -279,6 +317,11 @@ create_admin_user() {
   fi
 
   if ! getent passwd "$username" >/dev/null; then
+    read -rp "Создать пользователя $username? [y/N]: " confirmation
+    if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+      echo "Операция отменена. Пользователь не создан."
+      return 0
+    fi
     sudo adduser "$username" || return 1
   fi
 
@@ -300,6 +343,14 @@ EXIM_LOG="/var/log/exim4/mainlog"
 FAIL2BAN_CONFIG="/etc/fail2ban/jail.d/99-server-setup.conf"
 
 install_fail2ban() {
+  local confirmation
+
+  read -rp "Установить Fail2Ban, включить его в автозагрузку и запустить? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    echo "Операция отменена. Пакеты и службы не изменены."
+    return 0
+  fi
+
   echo "Устанавливаем Fail2Ban..."
   sudo apt-get update || return 1
   sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban || return 1
@@ -311,10 +362,18 @@ install_fail2ban() {
 setup_fail2ban_base() {
   local backup_file=""
   local temp_file
+  local confirmation
 
   if ! command -v fail2ban-client >/dev/null 2>&1; then
     echo -e "${RED}Fail2Ban не установлен. Сначала выполните пункт установки.${RESET}"
     return 1
+  fi
+
+  echo "Будет создан или заменён управляемый файл $FAIL2BAN_CONFIG, затем Fail2Ban будет перезапущен."
+  read -rp "Применить базовую конфигурацию Fail2Ban? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    echo "Операция отменена. Конфигурация Fail2Ban не изменена."
+    return 0
   fi
 
   echo "Настраиваем защиту SSH и доступные фильтры Nginx..."
@@ -422,6 +481,14 @@ setup_security_updates() {
   local origins_backup_file=""
   local temp_file
   local origins_temp_file
+  local confirmation
+
+  echo "Будет установлен unattended-upgrades, записаны настройки APT и включены системные таймеры обновлений."
+  read -rp "Включить автоматическую установку security-обновлений? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    echo "Операция отменена. Настройки автоматических обновлений не изменены."
+    return 0
+  fi
 
   echo "Устанавливаем unattended-upgrades..."
   sudo apt-get update || return 1
@@ -591,11 +658,19 @@ nginx_status() {
 }
 
 nginx_reload() {
+  local confirmation
+
   echo -e "${GREEN}Проверяем конфигурацию: sudo nginx -t ${RESET}"
   sudo nginx -t || {
     echo -e "${RED}Конфигурация Nginx содержит ошибку. Перезагрузка отменена.${RESET}"
     return 1
   }
+
+  read -rp "Конфигурация корректна. Перечитать конфигурацию Nginx? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    echo "Операция отменена. Nginx не перечитывал конфигурацию."
+    return 0
+  fi
 
   sudo systemctl reload nginx || return 1
   sudo systemctl is-active --quiet nginx || return 1
