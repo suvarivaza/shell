@@ -579,6 +579,231 @@ fail2ban_log() {
   sudo tail -f /var/log/fail2ban.log
 }
 
+######### Logwatch ########
+
+LOGWATCH_CONFIG="/etc/logwatch/conf/logwatch.conf"
+LOGWATCH_SERVICES_DIR="/usr/share/logwatch/scripts/services"
+
+logwatch_status() {
+  echo -e "${CYAN}=== Состояние Logwatch ===${RESET}"
+
+  if command -v logwatch >/dev/null 2>&1; then
+    show_command logwatch --version
+    logwatch --version
+  else
+    echo "Logwatch не установлен."
+  fi
+
+  echo
+  echo "Локальная конфигурация: $LOGWATCH_CONFIG"
+  if sudo test -f "$LOGWATCH_CONFIG"; then
+    show_command sudo sed -n 1,200p "$LOGWATCH_CONFIG"
+    sudo sed -n '1,200p' "$LOGWATCH_CONFIG"
+  else
+    echo "Локальный файл конфигурации отсутствует."
+  fi
+
+  echo
+  echo "Задания автоматического запуска:"
+  sudo find /etc/cron.daily /etc/cron.d /etc/systemd/system /lib/systemd/system \
+    -maxdepth 2 -iname '*logwatch*' -print 2>/dev/null || true
+}
+
+install_logwatch() {
+  local confirmation
+
+  if command -v logwatch >/dev/null 2>&1; then
+    echo -e "${GREEN}Logwatch уже установлен.${RESET}"
+    logwatch_status
+    return 0
+  fi
+
+  show_command_plan_header
+  show_command sudo apt-get update
+  show_command sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y logwatch
+  echo "Пакет может установить стандартное ежедневное cron-задание дистрибутива."
+  echo "Почтовый адрес и состав отчёта настраиваются отдельным пунктом меню."
+  read -rp "Установить Logwatch? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    echo "Операция отменена. Пакеты не изменены."
+    return 0
+  fi
+
+  run_command sudo apt-get update || return 1
+  run_command sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y logwatch || return 1
+  command -v logwatch >/dev/null 2>&1 || {
+    echo -e "${RED}После установки команда logwatch не найдена.${RESET}"
+    return 1
+  }
+
+  echo -e "${GREEN}Logwatch установлен.${RESET}"
+  logwatch_status
+}
+
+list_logwatch_services() {
+  if [[ ! -d "$LOGWATCH_SERVICES_DIR" ]]; then
+    echo -e "${RED}Каталог анализаторов Logwatch не найден. Сначала установите Logwatch.${RESET}"
+    return 1
+  fi
+
+  echo -e "${CYAN}=== Доступные анализаторы Logwatch ===${RESET}"
+  show_command find "$LOGWATCH_SERVICES_DIR" -maxdepth 1 -type f -printf '%f\n'
+  find "$LOGWATCH_SERVICES_DIR" -maxdepth 1 -type f -printf '%f\n' | sort
+}
+
+logwatch_yesterday_report() {
+  if ! command -v logwatch >/dev/null 2>&1; then
+    echo -e "${RED}Logwatch не установлен.${RESET}"
+    return 1
+  fi
+
+  show_command sudo logwatch --output stdout --format text --range yesterday --detail Med --service All
+  sudo logwatch --output stdout --format text --range yesterday --detail Med --service All
+}
+
+logwatch_selected_report() {
+  local services_input
+  local service_name
+  local range
+  local -a service_names=()
+  local -a command=(sudo logwatch --output stdout --format text --detail High)
+
+  if ! command -v logwatch >/dev/null 2>&1; then
+    echo -e "${RED}Logwatch не установлен.${RESET}"
+    return 1
+  fi
+
+  list_logwatch_services || return 1
+  echo
+  read -rp "Введите названия анализаторов через пробел: " services_input
+  read -rp "Период [today/yesterday, по умолчанию today]: " range
+  range="${range:-today}"
+
+  if [[ "$range" != "today" && "$range" != "yesterday" ]]; then
+    echo -e "${RED}Допустимы только значения today или yesterday.${RESET}"
+    return 1
+  fi
+
+  read -r -a service_names <<< "$services_input"
+  if ((${#service_names[@]} == 0)); then
+    echo -e "${RED}Не указан ни один анализатор.${RESET}"
+    return 1
+  fi
+
+  command+=(--range "$range")
+  for service_name in "${service_names[@]}"; do
+    if [[ ! "$service_name" =~ ^[a-zA-Z0-9_.+-]+$ ]] ||
+       [[ ! -f "$LOGWATCH_SERVICES_DIR/$service_name" ]]; then
+      echo -e "${RED}Анализатор не найден: $service_name${RESET}"
+      return 1
+    fi
+    command+=(--service "$service_name")
+  done
+
+  show_command "${command[@]}"
+  "${command[@]}"
+}
+
+configure_logwatch_email() {
+  local mail_to
+  local mail_from
+  local hostname_value
+  local backup_file=""
+  local temp_file
+  local confirmation
+
+  if ! command -v logwatch >/dev/null 2>&1; then
+    echo -e "${RED}Logwatch не установлен.${RESET}"
+    return 1
+  fi
+
+  read -rp "Email получателя ежедневного отчёта: " mail_to
+  if [[ ! "$mail_to" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]; then
+    echo -e "${RED}Некорректный email получателя.${RESET}"
+    return 1
+  fi
+
+  hostname_value=$(hostname -f 2>/dev/null || hostname)
+  read -rp "Email отправителя [logwatch@$hostname_value]: " mail_from
+  mail_from="${mail_from:-logwatch@$hostname_value}"
+  if [[ ! "$mail_from" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]; then
+    echo -e "${RED}Некорректный email отправителя.${RESET}"
+    return 1
+  fi
+
+  echo "Будет настроен ежедневный отчёт по всем установленным анализаторам:"
+  echo "  MailTo = $mail_to"
+  echo "  MailFrom = $mail_from"
+  echo "  Range = yesterday"
+  echo "  Detail = Med"
+  echo "  Service = All"
+  echo "  Output = mail"
+  echo "Файл: $LOGWATCH_CONFIG"
+  show_command_plan_header
+  echo "  Запись управляемого файла: $LOGWATCH_CONFIG"
+  read -rp "Записать конфигурацию ежедневного почтового отчёта? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    echo "Операция отменена. Конфигурация не изменена."
+    return 0
+  fi
+
+  backup_file=$(create_backup "$LOGWATCH_CONFIG") || return 1
+  temp_file=$(mktemp) || return 1
+  cat > "$temp_file" <<EOF
+# Управляемая конфигурация ежедневного отчёта Logwatch.
+Output = mail
+Format = text
+MailTo = $mail_to
+MailFrom = $mail_from
+Range = yesterday
+Detail = Med
+Service = All
+EOF
+
+  run_command sudo mkdir -p /etc/logwatch/conf || {
+    rm -f "$temp_file"
+    return 1
+  }
+  run_command sudo install -m 644 "$temp_file" "$LOGWATCH_CONFIG" || {
+    rm -f "$temp_file"
+    restore_backup "$backup_file" "$LOGWATCH_CONFIG"
+    return 1
+  }
+  rm -f "$temp_file"
+
+  echo -e "${GREEN}Почтовый отчёт Logwatch настроен.${RESET}"
+  echo "Перед ожиданием автоматического запуска проверьте доставку вручную:"
+  show_command sudo logwatch --output mail --range today --detail Med --service All
+  logwatch_status
+}
+
+logwatch_menu() {
+  while true; do
+    echo
+    echo -e "${CYAN}=== Logwatch ===${RESET}"
+    echo "1. Показать состояние и конфигурацию"
+    echo "2. Установить Logwatch"
+    echo "3. Отчёт по всем анализаторам за вчера"
+    echo "4. Выборочный отчёт"
+    echo "5. Показать доступные анализаторы"
+    echo "6. Настроить ежедневный отчёт по email"
+    echo "0. Назад в главное меню"
+    echo
+    read -rp "Выберите действие: " CHOICE
+
+    case $CHOICE in
+      1) logwatch_status ;;
+      2) install_logwatch ;;
+      3) logwatch_yesterday_report ;;
+      4) logwatch_selected_report ;;
+      5) list_logwatch_services ;;
+      6) configure_logwatch_email ;;
+      0) break ;;
+      *) echo "Неверный выбор. Пожалуйста, попробуйте снова." ;;
+    esac
+  done
+}
+
 ######### Автоматические обновления безопасности ########
 
 UNATTENDED_CONFIG="/etc/apt/apt.conf.d/20auto-upgrades"
@@ -767,6 +992,110 @@ disable_unneeded_service() {
   echo "Для возврата: sudo systemctl enable --now $service_name"
 }
 
+disable_proftpd() {
+  local confirmation
+
+  echo -e "${CYAN}=== Отключение FTP-сервера ProFTPD ===${RESET}"
+  if ! systemd_unit_exists proftpd; then
+    echo "Служба ProFTPD не установлена."
+    echo "Проверяем, не слушает ли другой процесс стандартные FTP-порты 20 и 21:"
+    sudo ss -lntup | awk '$5 ~ /:(20|21)$/ {print}'
+    return 0
+  fi
+
+  echo "ProFTPD будет немедленно остановлен и исключён из автозагрузки."
+  echo "Существующие FTP-подключения будут разорваны. SFTP через SSH это действие не отключает."
+  show_command_plan_header
+  show_command sudo systemctl disable --now proftpd
+  read -rp "Для подтверждения отключения FTP введите proftpd: " confirmation
+  if [[ "$confirmation" != "proftpd" ]]; then
+    echo "Операция отменена. Служба не изменена."
+    return 0
+  fi
+
+  run_command sudo systemctl disable --now proftpd || return 1
+
+  echo
+  echo "Состояние ProFTPD после отключения:"
+  systemctl is-active proftpd 2>/dev/null || true
+  systemctl is-enabled proftpd 2>/dev/null || true
+
+  echo
+  echo "Процессы, слушающие стандартные FTP-порты 20 и 21:"
+  if ! sudo ss -lntup | awk '$5 ~ /:(20|21)$/ {found = 1; print} END {exit !found}'; then
+    echo -e "${GREEN}Порты 20 и 21 не прослушиваются.${RESET}"
+  else
+    echo -e "${YELLOW}Порты 20 или 21 всё ещё прослушиваются другим процессом. Проверьте вывод выше.${RESET}"
+  fi
+
+  echo "Для возврата: sudo systemctl enable --now proftpd"
+}
+
+disable_mail_services() {
+  local service_name
+  local confirmation
+  local -a mail_services=(
+    exim4 postfix dovecot
+    opendkim rspamd spamassassin spamd
+    clamav-daemon clamav-freshclam
+  )
+  local -a installed_services=()
+
+  echo -e "${CYAN}=== Отключение почтовых сервисов ===${RESET}"
+  for service_name in "${mail_services[@]}"; do
+    if systemd_unit_exists "$service_name"; then
+      installed_services+=("$service_name")
+    fi
+  done
+
+  if ((${#installed_services[@]} == 0)); then
+    echo "Поддерживаемые почтовые службы не найдены."
+    echo "Проверяем стандартные почтовые порты:"
+    sudo ss -lntup | awk '$5 ~ /:(25|110|143|465|587|993|995)$/ {print}'
+    return 0
+  fi
+
+  echo "Будут остановлены и отключены из автозагрузки найденные службы:"
+  printf '  %s\n' "${installed_services[@]}"
+  echo
+  echo -e "${RED}После выполнения сервер перестанет обслуживать локальную почтовую систему.${RESET}"
+  echo "Могут перестать работать:"
+  echo "  - почтовые ящики и Roundcube в ISPmanager;"
+  echo "  - отправка Joomla/PHP через mail() или локальный sendmail;"
+  echo "  - системные, cron- и Logwatch-уведомления;"
+  echo "  - получение почты по SMTP, IMAP и POP3."
+  echo "Это действие допустимо, только если приложения используют внешний SMTP или вообще не отправляют почту."
+  show_command_plan_header
+  show_command sudo systemctl disable --now "${installed_services[@]}"
+  read -rp "Для подтверждения введите ОТКЛЮЧИТЬ ПОЧТУ: " confirmation
+  if [[ "$confirmation" != "ОТКЛЮЧИТЬ ПОЧТУ" ]]; then
+    echo "Операция отменена. Почтовые службы не изменены."
+    return 0
+  fi
+
+  run_command sudo systemctl disable --now "${installed_services[@]}" || return 1
+
+  echo
+  echo "Состояние почтовых служб после отключения:"
+  for service_name in "${installed_services[@]}"; do
+    printf '%-24s active=%-10s enabled=%s\n' \
+      "$service_name" \
+      "$(systemctl is-active "$service_name" 2>/dev/null || true)" \
+      "$(systemctl is-enabled "$service_name" 2>/dev/null || true)"
+  done
+
+  echo
+  echo "Процессы, слушающие стандартные почтовые порты:"
+  if ! sudo ss -lntup | awk '$5 ~ /:(25|110|143|465|587|993|995)$/ {found = 1; print} END {exit !found}'; then
+    echo -e "${GREEN}Стандартные почтовые порты не прослушиваются.${RESET}"
+  else
+    echo -e "${YELLOW}Один или несколько почтовых портов всё ещё прослушиваются. Проверьте процесс в выводе выше.${RESET}"
+  fi
+
+  echo "Для возврата служб используйте:"
+  show_command sudo systemctl enable --now "${installed_services[@]}"
+}
+
 ######### nginx  ########
 
 NGINX_BAD_ROBOT_CONFIG="/etc/nginx/vhosts-includes/bad_robot.conf"
@@ -923,6 +1252,30 @@ open_ports() {
   sudo ss -lntup
 }
 
+potentially_public_ports() {
+  echo -e "${CYAN}=== Сокеты, слушающие не только локальный интерфейс ===${RESET}"
+  echo "Показываются TCP- и UDP-сокеты, которые не привязаны к 127.0.0.1 или ::1."
+  echo -e "${YELLOW}Это потенциально публичные порты, а не доказательство доступности из интернета.${RESET}"
+  echo "Фактический доступ также зависит от iptables, внешнего фаервола, NAT и маршрутизации."
+  echo -e "${GREEN}Выполняю: sudo ss -H -lntup | awk '<исключение loopback-адресов>' ${RESET}"
+
+  sudo ss -H -lntup | awk '
+    {
+      local_address = $5
+      if (local_address !~ /^127\./ &&
+          local_address !~ /^\[?::1\]?:/) {
+        print
+      }
+    }
+  '
+
+  echo
+  echo "Для точной проверки запустите с другого сервера:"
+  echo "  nmap -Pn -sS -sV <публичный-IP>"
+  echo "UDP проверяется отдельно и значительно медленнее:"
+  echo "  sudo nmap -Pn -sU --top-ports 100 <публичный-IP>"
+}
+
 filesystem_security_audit() {
   local web_root="/var/www"
 
@@ -996,6 +1349,19 @@ collect_security_report() {
   echo
   echo -e "${BLUE}Открытые TCP/UDP-порты:${RESET}"
   sudo ss -lntup
+
+  echo
+  echo -e "${BLUE}Потенциально публичные TCP/UDP-порты:${RESET}"
+  sudo ss -H -lntup | awk '
+    {
+      local_address = $5
+      if (local_address !~ /^127\./ &&
+          local_address !~ /^\[?::1\]?:/) {
+        print
+      }
+    }
+  '
+  echo "Фактическая доступность должна проверяться с внешнего хоста."
 
   echo
   echo -e "${BLUE}Пользователи с UID 0:${RESET}"
@@ -1140,13 +1506,15 @@ network_menu() {
   while true; do
     echo
     echo -e "${CYAN}=== Сеть ===${RESET}"
-    echo "1. Открытые порты"
+    echo "1. Все слушающие порты"
+    echo "2. Потенциально открытые наружу порты"
     echo "0. Назад в главное меню"
     echo
     read -p "Выберите действие: " CHOICE
 
     case $CHOICE in
     1) open_ports ;;
+    2) potentially_public_ports ;;
     0) break ;;
     *) echo "Неверный выбор. Пожалуйста, попробуйте снова." ;;
     esac
@@ -1233,12 +1601,16 @@ services_security_menu() {
     echo -e "${CYAN}=== Инвентаризация служб ===${RESET}"
     echo "1. Показать значимые службы и открытые порты"
     echo "2. Остановить и отключить выбранную ненужную службу"
+    echo "3. Отключить FTP-сервер ProFTPD"
+    echo "4. Отключить почтовые сервисы"
     echo "0. Назад в главное меню"
     read -rp "Выберите действие: " CHOICE
 
     case $CHOICE in
       1) security_service_inventory ;;
       2) disable_unneeded_service ;;
+      3) disable_proftpd ;;
+      4) disable_mail_services ;;
       0) break ;;
       *) echo "Неверный выбор." ;;
     esac
@@ -1906,6 +2278,7 @@ while true; do
   echo "11. Проверка файловой системы"
   echo "12. Сохранить итоговый отчёт безопасности"
   echo "13. Docker"
+  echo "14. Logwatch"
   echo "0. Выход"
   echo
   read -p "Введите номер раздела: " MAIN_CHOICE
@@ -1924,6 +2297,7 @@ while true; do
   11) filesystem_security_audit ;;
   12) save_security_report ;;
   13) docker_menu ;;
+  14) logwatch_menu ;;
   0)
     echo "Выход."
     exit 0
