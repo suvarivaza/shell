@@ -804,6 +804,106 @@ logwatch_menu() {
   done
 }
 
+######### GoAccess ########
+
+goaccess_status() {
+  echo -e "${CYAN}=== Состояние GoAccess ===${RESET}"
+
+  if command -v goaccess >/dev/null 2>&1; then
+    show_command goaccess --version
+    goaccess --version
+  else
+    echo "GoAccess не установлен."
+  fi
+
+  echo
+  echo "Найденные журналы доступа веб-серверов:"
+  sudo find /var/log/nginx /var/log/apache2 /var/www/httpd-logs \
+    -maxdepth 2 -type f \
+    \( -name '*access*.log' -o -name '*access_log*' \) \
+    -print 2>/dev/null | sort || true
+}
+
+install_goaccess() {
+  local confirmation
+
+  if command -v goaccess >/dev/null 2>&1; then
+    echo -e "${GREEN}GoAccess уже установлен.${RESET}"
+    goaccess_status
+    return 0
+  fi
+
+  show_command_plan_header
+  show_command sudo apt-get update
+  show_command sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y goaccess
+  read -rp "Установить GoAccess? [y/N]: " confirmation
+  if [[ ! "$confirmation" =~ ^[YyДд]$ ]]; then
+    echo "Операция отменена. Пакеты не изменены."
+    return 0
+  fi
+
+  run_command sudo apt-get update || return 1
+  run_command sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y goaccess || return 1
+  command -v goaccess >/dev/null 2>&1 || {
+    echo -e "${RED}После установки команда goaccess не найдена.${RESET}"
+    return 1
+  }
+
+  echo -e "${GREEN}GoAccess установлен.${RESET}"
+  goaccess_status
+}
+
+run_goaccess() {
+  local access_log_file
+
+  if ! command -v goaccess >/dev/null 2>&1; then
+    echo -e "${RED}GoAccess не установлен. Сначала выполните пункт установки.${RESET}"
+    return 1
+  fi
+
+  goaccess_status
+  echo
+  read -er -p "Введите абсолютный путь к access.log: " access_log_file
+  if [[ "$access_log_file" != /* ]]; then
+    echo -e "${RED}Необходимо указать абсолютный путь к журналу.${RESET}"
+    return 1
+  fi
+  if ! sudo test -f "$access_log_file"; then
+    echo -e "${RED}Файл не найден: $access_log_file${RESET}"
+    return 1
+  fi
+  if ! sudo test -r "$access_log_file"; then
+    echo -e "${RED}Файл недоступен для чтения даже через sudo: $access_log_file${RESET}"
+    return 1
+  fi
+
+  echo "GoAccess будет запущен в интерактивном режиме с форматом журнала COMBINED."
+  echo "Для выхода из интерфейса GoAccess нажмите q."
+  show_command sudo goaccess "$access_log_file" --log-format=COMBINED
+  sudo goaccess "$access_log_file" --log-format=COMBINED
+}
+
+goaccess_menu() {
+  while true; do
+    echo
+    echo -e "${CYAN}=== GoAccess ===${RESET}"
+    echo "1. Показать состояние и найденные access.log"
+    echo "2. Установить GoAccess"
+    echo "3. Проанализировать access.log интерактивно"
+    echo "0. Назад в главное меню"
+    echo
+    read -rp "Выберите действие: " CHOICE
+
+    case $CHOICE in
+      1) goaccess_status ;;
+      2) install_goaccess ;;
+      3) run_goaccess ;;
+      0) break ;;
+      *) echo "Неверный выбор. Пожалуйста, попробуйте снова." ;;
+    esac
+  done
+}
+
 ######### Автоматические обновления безопасности ########
 
 UNATTENDED_CONFIG="/etc/apt/apt.conf.d/20auto-upgrades"
@@ -2279,6 +2379,7 @@ while true; do
   echo "12. Сохранить итоговый отчёт безопасности"
   echo "13. Docker"
   echo "14. Logwatch"
+  echo "15. GoAccess"
   echo "0. Выход"
   echo
   read -p "Введите номер раздела: " MAIN_CHOICE
@@ -2298,6 +2399,7 @@ while true; do
   12) save_security_report ;;
   13) docker_menu ;;
   14) logwatch_menu ;;
+  15) goaccess_menu ;;
   0)
     echo "Выход."
     exit 0
